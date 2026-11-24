@@ -4,7 +4,12 @@ import { getAudioBuffer, getAudioContext, getPeaks, importFile, pickFiles } from
 import { BUILTIN_SOUNDS, renderBuiltin } from './builtin'
 import { importFiles } from '../video/MediaBin'
 import { fmtTime, Check } from '../ui/controls'
-import type { MediaItem } from '../core/types'
+import type { MediaItem, Clip } from '../core/types'
+import { VOICES, VOICE_LABELS, DEFAULT_FX } from './fx'
+import { computeDucking } from './duck'
+import { detectBeats } from './beats'
+import { Slider, Select } from '../ui/controls'
+import { startPlayback, stopPlayback } from './engine'
 
 function addAudioClip(m: MediaItem, start: number, inPoint: number, dur: number, opts: { fadeOut?: number; fadeIn?: number; volume?: number } = {}) {
   const st = useStore.getState()
@@ -196,6 +201,9 @@ export function AudioTab() {
             }}>🔉 Make background (30%)</button>
           </div>
         </div> : <div className="card"><h3>No audio yet</h3><div className="hint">Import a song, record a voiceover, or click ▶ on a built-in sound.</div></div>}
+        <ClipEffects />
+        <DuckingCard />
+        {cur && <BeatsCard m={cur} />}
         <div className="card">
           <h3>🎚 Mixer</h3>
           <div className="mixer">
@@ -227,6 +235,114 @@ export function AudioTab() {
           <div className="hint">Per-clip volume, fades and speed are in the Video tab's inspector when you select an audio clip.</div>
         </div>
       </div>
+    </div>
+  )
+}
+
+/** Per-clip voice effects / clean-up for clips already on the timeline. */
+export function FxControls({ c }: { c: Clip }) {
+  const { update, checkpoint } = useStore.getState()
+  const fx = c.audioFx ?? DEFAULT_FX()
+  const set = (fn: (f: NonNullable<Clip['audioFx']>) => void, undo = false) => update((p) => { const x = p.clips.find((y) => y.id === c.id); if (!x) return; x.audioFx = x.audioFx ?? DEFAULT_FX(); fn(x.audioFx) }, undo)
+  return <>
+    <Select label="Voice effect" value={fx.voice} options={VOICES.map((v) => ({ value: v, label: VOICE_LABELS[v] }))} onChange={(v) => set((f) => { f.voice = v }, true)} />
+    <Slider label="Noise reduce" min={0} max={1} value={fx.denoise} onCommit={checkpoint} onChange={(v) => set((f) => { f.denoise = v })} />
+    <Slider label="Bass dB" min={-15} max={15} step={0.5} value={fx.bass} onCommit={checkpoint} onChange={(v) => set((f) => { f.bass = v })} />
+    <Slider label="Treble dB" min={-15} max={15} step={0.5} value={fx.treble} onCommit={checkpoint} onChange={(v) => set((f) => { f.treble = v })} />
+    <div className="row">
+      <button onClick={async () => {
+        const buf = await getAudioBuffer(c.mediaId!)
+        if (!buf) return
+        const d = buf.getChannelData(0), sr = buf.sampleRate
+        let peak = 0
+        for (let i = Math.floor(c.inPoint * sr); i < Math.min(d.length, (c.inPoint + c.duration * c.speed) * sr); i += 2) peak = Math.max(peak, Math.abs(d[i]))
+        if (peak > 0) update((p) => { const x = p.clips.find((y) => y.id === c.id); if (x) x.volume = Math.min(4, Math.round((0.89 / peak) * 100) / 100) })
+        useStore.getState().notify(`Volume set to ${Math.round((0.89 / Math.max(peak, 1e-3)) * 100)}% (peak −1 dB)`)
+      }}>📈 Normalize loudness</button>
+      {(c.volumeKeys?.length ?? 0) > 0 && <button onClick={() => update((p) => { const x = p.clips.find((y) => y.id === c.id); if (x) x.volumeKeys = [] })}>Remove ducking</button>}
+    </div>
+  </>
+}
+
+function ClipEffects() {
+  const project = useStore((s) => s.project)
+  const [id, setId] = useState<string>('')
+  const clips = project.clips.filter((c) => c.kind === 'audio' || (c.kind === 'video' && project.media.find((m) => m.id === c.mediaId)?.hasAudio))
+  const c = clips.find((x) => x.id === id) ?? clips[0]
+  const [previewing, setPreviewing] = useState(false)
+  if (!clips.length) return <div className="card"><h3>🎛 Voice effects & clean-up</h3><div className="hint">Add audio to the timeline first, then pick effects here.</div></div>
+  return (
+    <div className="card">
+      <h3>🎛 Voice effects & clean-up</h3>
+      <Select label="Clip" value={c.id} options={clips.map((x) => ({ value: x.id, label: `${x.name} @ ${fmtTime(x.start)}` }))} onChange={setId} />
+      <FxControls c={c} />
+      <div className="row">
+        <button className="primary" onClick={async () => {
+          if (previewing) { stopPlayback(); setPreviewing(false); return }
+          const solo = { ...project, clips: [c], tracks: project.tracks.map((t) => ({ ...t, muted: false })) }
+          await startPlayback(solo, c.start)
+          setPreviewing(true)
+          setTimeout(() => { stopPlayback(); setPreviewing(false) }, Math.min(15, c.duration) * 1000)
+        }}>{previewing ? '⏹ Stop' : '▶ Preview this clip'}</button>
+        <span className="hint">Effects apply in playback and exports.</span>
+      </div>
+    </div>
+  )
+}
+
+function DuckingCard() {
+  const project = useStore((s) => s.project)
+  const audioTracks = project.tracks.filter((t) => t.kind === 'audio')
+  const [track, setTrack] = useState('')
+  const [amount, setAmount] = useState(0.7)
+  const [busy, setBusy] = useState(false)
+  const tId = audioTracks.find((t) => t.id === track)?.id ?? audioTracks[0]?.id
+  return (
+    <div className="card">
+      <h3>🔉 Auto-ducking</h3>
+      <div className="hint">Automatically lowers your music whenever someone is talking (voiceover or video sound), then brings it back up.</div>
+      {audioTracks.length ? <>
+        <Select label="Music track" value={tId ?? ''} options={audioTracks.map((t) => ({ value: t.id, label: `${t.name} (${project.clips.filter((c) => c.trackId === t.id).length} clips)` }))} onChange={setTrack} />
+        <Slider label="Duck by" min={0.1} max={0.95} value={amount} onChange={setAmount} />
+        <div className="row">
+          <button className="primary" disabled={busy || !tId} onClick={async () => {
+            setBusy(true)
+            const { result, voiceCount } = await computeDucking(project, tId!, amount)
+            setBusy(false)
+            if (!voiceCount) return useStore.getState().notify('No voice found on other tracks. Record a voiceover or add a video with sound.')
+            useStore.getState().update((p) => { for (const c of p.clips) if (result.has(c.id)) c.volumeKeys = result.get(c.id) })
+            useStore.getState().notify('Ducking applied to the music track')
+          }}>{busy ? 'Analysing…' : 'Apply ducking'}</button>
+          <button onClick={() => useStore.getState().update((p) => { for (const c of p.clips) if (c.trackId === tId) c.volumeKeys = [] })}>Remove</button>
+        </div>
+      </> : <div className="hint">Add music to an audio track first.</div>}
+    </div>
+  )
+}
+
+function BeatsCard({ m }: { m: MediaItem }) {
+  const [info, setInfo] = useState<string | null>(null)
+  return (
+    <div className="card">
+      <h3>🥁 Beat detection: {m.name}</h3>
+      <div className="row">
+        <button onClick={async () => {
+          const buf = await getAudioBuffer(m.id)
+          if (!buf) return
+          const beats = detectBeats(buf)
+          const gaps = beats.slice(1).map((b, i) => b - beats[i]).filter((g) => g > 0.25 && g < 1.5).sort((a, b) => a - b)
+          let bpm = gaps.length ? 60 / gaps[Math.floor(gaps.length / 2)] : 0
+          while (bpm > 150) bpm /= 2
+          while (bpm && bpm < 70) bpm *= 2
+          bpm = Math.round(bpm)
+          const clip = useStore.getState().project.clips.find((c) => c.mediaId === m.id)
+          const offset = clip ? clip.start - clip.inPoint : useStore.getState().playhead
+          useStore.getState().update((p) => { p.markers = Array.from(new Set([...(p.markers ?? []), ...beats.map((b) => Math.round((b + offset) * 1000) / 1000)])).filter((t) => t >= 0).sort((a, b) => a - b) })
+          setInfo(`${beats.length} beats${bpm ? ` · about ${bpm} BPM` : ''}. Markers added to the timeline${clip ? ' (aligned to this clip)' : ' at the playhead'}.`)
+        }}>Detect beats → timeline markers</button>
+      </div>
+      {info && <div className="small">{info}</div>}
+      <div className="hint">In the Video tab, select a clip and press "✂ Cut to beats" to cut it on every beat.</div>
     </div>
   )
 }

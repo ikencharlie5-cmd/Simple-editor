@@ -70,6 +70,8 @@ export interface Keyframe {
 }
 export type Ease = 'linear' | 'easeIn' | 'easeOut' | 'easeInOut' | 'bounce' | 'elastic' | 'back' | 'hold'
 
+export interface AudioFx { voice: string; denoise: number; bass: number; treble: number }
+
 export interface Clip {
   id: string
   trackId: string
@@ -101,6 +103,9 @@ export interface Clip {
   reverse?: boolean
   speedCurve?: string
   removeBg?: boolean
+  audioFx?: AudioFx
+  /** volume automation (e.g. auto-ducking): times relative to clip start, v multiplies volume */
+  volumeKeys?: { t: number; v: number }[]
   removeBgSoftness?: number
 }
 

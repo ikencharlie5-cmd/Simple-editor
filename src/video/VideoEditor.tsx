@@ -7,6 +7,7 @@ import { Timeline } from './Timeline'
 import { usePreview } from './player'
 import { FILTER_PRESETS, clipTransformAt, renderFrame, clipBox, SPEED_CURVES } from './render'
 import { mixdown } from '../audio/engine'
+import { FxControls } from '../audio/AudioTab'
 import { transcribe, splitCaptions } from '../core/captions'
 import { loadSegmenter, segmenterStatus } from '../core/segment'
 import { Modal } from '../ui/controls'
@@ -251,6 +252,7 @@ function Inspector() {
         <Slider label="Volume" min={0} max={2} value={c.volume} onCommit={checkpoint} onChange={(v) => set((x) => { x.volume = v })} />
         <Slider label="Fade in" min={0} max={Math.min(10, c.duration)} value={c.fadeIn} onCommit={checkpoint} onChange={(v) => set((x) => { x.fadeIn = v })} />
         <Slider label="Fade out" min={0} max={Math.min(10, c.duration)} value={c.fadeOut} onCommit={checkpoint} onChange={(v) => set((x) => { x.fadeOut = v })} />
+        <FxControls c={c} />
       </Section>}
       {visual && c.kind !== 'text' && <Section title="Adjust" defaultOpen={false}>
         <Select label="Filter" value={c.filterPreset} options={Object.keys(FILTER_PRESETS)} onChange={(v) => set((x) => { x.filterPreset = v }, true)} />

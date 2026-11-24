@@ -1,6 +1,7 @@
 import type { Clip, Project } from '../core/types'
 import { getAudioBuffer, getAudioContext, peekAudioBuffer } from '../core/media'
 import { clipEnd, projectDuration } from '../core/store'
+import { processBuffer, buildChain } from './fx'
 
 /** Clips that produce sound. */
 export function audibleClips(p: Project) {
@@ -29,42 +30,48 @@ function reversedSegment(buf: AudioBuffer, start: number, len: number) {
   return out
 }
 
+export function volumeAt(c: Clip, local: number) {
+  const k = c.volumeKeys
+  if (!k?.length) return 1
+  if (local <= k[0].t) return k[0].v
+  for (let i = 0; i < k.length - 1; i++) if (local <= k[i + 1].t) { const f = (local - k[i].t) / Math.max(1e-6, k[i + 1].t - k[i].t); return k[i].v + (k[i + 1].v - k[i].v) * f }
+  return k[k.length - 1].v
+}
+
 function scheduleClip(ctx: BaseAudioContext, dest: AudioNode, p: Project, c: Clip, buf: AudioBuffer, from: number, when: number) {
   const tr = p.tracks.find((t) => t.id === c.trackId)!
   const startT = Math.max(from, c.start)
   const end = clipEnd(c)
   if (startT >= end) return null
-  const src = ctx.createBufferSource()
-  let rate = c.speed
+  buf = processBuffer(c, buf)
   let offsetBase = c.inPoint
   if (c.reverse) { buf = reversedSegment(buf, c.inPoint, c.duration * c.speed); offsetBase = 0 }
+  const src = ctx.createBufferSource()
   src.buffer = buf
-  src.playbackRate.value = rate
+  src.playbackRate.value = c.speed
   const gain = ctx.createGain()
   const vol = c.volume * tr.volume
   const at = when + (startT - from)
   const stopAt = when + (end - from)
-  const g = gain.gain
-  // envelope with fades
+  // envelope: fades + volume automation, sampled every 50 ms
   const valueAt = (tt: number) => {
-    let v = vol
+    let v = vol * volumeAt(c, tt - c.start)
     if (c.fadeIn > 0 && tt - c.start < c.fadeIn) v *= (tt - c.start) / c.fadeIn
     if (c.fadeOut > 0 && end - tt < c.fadeOut) v *= (end - tt) / c.fadeOut
     return Math.max(0, v)
   }
+  const g = gain.gain
   g.setValueAtTime(valueAt(startT), at)
-  if (c.fadeIn > 0 && startT < c.start + c.fadeIn) g.linearRampToValueAtTime(vol, when + (c.start + c.fadeIn - from))
-  if (c.fadeOut > 0) {
-    const fs = Math.max(startT, end - c.fadeOut)
-    g.setValueAtTime(valueAt(fs), when + (fs - from))
-    g.linearRampToValueAtTime(0, stopAt)
-  }
-  src.connect(gain).connect(dest)
-  rate = c.speed
+  const dynamic = c.fadeIn > 0 || c.fadeOut > 0 || (c.volumeKeys?.length ?? 0) > 0
+  if (dynamic) for (let tt = startT + 0.05; tt < end; tt += 0.05) g.linearRampToValueAtTime(valueAt(tt), when + (tt - from))
+  const chain = buildChain(ctx, c.audioFx)
+  src.connect(chain.input)
+  chain.output.connect(gain).connect(dest)
   const offset = offsetBase + (startT - c.start) * c.speed
-  if (offset >= buf.duration) return null
+  if (offset >= buf.duration) { chain.stop?.(); return null }
   src.start(at, offset)
   src.stop(stopAt)
+  src.onended = () => chain.stop?.()
   return src
 }
 
