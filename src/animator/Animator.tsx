@@ -4,16 +4,43 @@ import { useStore } from '../core/store'
 import type { AnimLayer, AnimProp, AnimationDoc, Ease, MediaItem, ShapeType } from '../core/types'
 import { ANIM_PROPS } from '../core/types'
 import { EASES, IN_PRESETS, LOOP_PRESETS, setKey, clamp } from '../core/anim'
-import { drawLayer, layerSize, layerState, layerValue, renderAnimation, preloadAnimation } from './render'
+import { drawLayer, layerSize, layerValue, renderAnimation, preloadAnimation, worldMatrix, parentMatrix, pathPolyline } from './render'
+import { getAudioBuffer, getAudioContext, getPeaks } from '../core/media'
+import { Graph } from './Graph'
 import { Check, Color, Section, Select, Slider, fmtTime } from '../ui/controls'
 import { getImage, importFile, pickFiles, getVideo, peekVideo } from '../core/media'
 import { newTrack, clipEnd, makeClip } from '../core/store'
 import { drawVideoFit, trackPoint } from './track'
 
-const BASE: Record<AnimProp, number> = { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1, reveal: 1, blur: 0, hue: 0 }
+const BASE: Record<AnimProp, number> = { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1, reveal: 1, blur: 0, hue: 0, path: 0 }
 const PROP_RANGE: Record<AnimProp, [number, number, number]> = {
   x: [-2000, 2000, 1], y: [-2000, 2000, 1], scale: [0, 5, 0.01], scaleX: [-3, 3, 0.01], scaleY: [-3, 3, 0.01], rotation: [-720, 720, 1],
-  opacity: [0, 1, 0.01], reveal: [0, 1, 0.01], blur: [0, 50, 0.5], hue: [-180, 180, 1],
+  opacity: [0, 1, 0.01], reveal: [0, 1, 0.01], blur: [0, 50, 0.5], hue: [-180, 180, 1], path: [0, 1, 0.001],
+}
+
+function isDescendant(a: AnimationDoc, id: string, ancestor: string): boolean {
+  let cur = a.layers.find((x) => x.id === id), n = 0
+  while (cur?.parentId && n++ < 20) { if (cur.parentId === ancestor) return true; cur = a.layers.find((x) => x.id === cur!.parentId) }
+  return false
+}
+
+function AudioLane({ mediaId, offset, duration, width }: { mediaId: string; offset: number; duration: number; width: number }) {
+  const ref = useRef<HTMLCanvasElement>(null)
+  const [ready, setReady] = useState(false)
+  useEffect(() => { void getAudioBuffer(mediaId).then(() => setReady(true)) }, [mediaId])
+  useEffect(() => {
+    const cv = ref.current
+    if (!cv || !ready) return
+    const w = Math.max(1, Math.round(width)); cv.width = w; cv.height = 30
+    const x = cv.getContext('2d')!
+    x.clearRect(0, 0, w, 30)
+    const peaks = getPeaks(mediaId, 4000)
+    const total = useStore.getState().project.media.find((m) => m.id === mediaId)?.duration || 1
+    if (!peaks) return
+    x.fillStyle = '#7dffbf'
+    for (let i = 0; i < w; i++) { const t = offset + (i / w) * duration; const v = peaks[Math.min(peaks.length - 1, Math.floor((t / total) * peaks.length))] ?? 0; const h = Math.max(1, v * 28); x.fillRect(i, 15 - h / 2, 1, h) }
+  }, [ready, mediaId, offset, duration, width])
+  return <canvas ref={ref} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', opacity: 0.8 }} />
 }
 
 export function newAnimation(name = 'Animation 1'): AnimationDoc {
@@ -69,6 +96,8 @@ export function Animator() {
   const [trackStatus, setTrackStatus] = useState<string | null>(null)
   const trackCancel = useRef(false)
   const [keepOffset, setKeepOffset] = useState(false)
+  const [pathMode, setPathMode] = useState(false)
+  const [graph, setGraph] = useState(false)
 
   const layer = doc?.layers.find((l) => l.id === layerId)
 
@@ -112,7 +141,22 @@ export function Animator() {
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
+    // soundtrack
+    let src: AudioBufferSourceNode | null = null
+    let alive = true
+    if (doc.audio) {
+      const au = doc.audio
+      void getAudioBuffer(au.mediaId).then(async (buf) => {
+        if (!buf || !alive) return
+        const ctx = getAudioContext(); await ctx.resume()
+        src = ctx.createBufferSource(); src.buffer = buf; src.loop = false
+        const g = ctx.createGain(); g.gain.value = au.volume
+        src.connect(g).connect(ctx.destination)
+        const off = time + au.offset
+        if (off < buf.duration) src.start(0, off, Math.max(0.01, doc.duration - time))
+      })
+    }
+    return () => { alive = false; cancelAnimationFrame(raf); try { src?.stop() } catch { /* */ } }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, doc?.duration])
 
@@ -169,16 +213,26 @@ export function Animator() {
     }
     ctx.restore()
     // selection box
+    // motion path of selected layer
+    if (layer?.path && layer.path.pts.length) {
+      ctx.save(); ctx.translate(view.ox, view.oy); ctx.scale(view.s, view.s)
+      const poly = layer.path.pts.length > 1 ? pathPolyline(layer.path) : layer.path.pts
+      ctx.strokeStyle = '#c084fc'; ctx.lineWidth = 2 / view.s; ctx.setLineDash([6 / view.s, 4 / view.s])
+      ctx.beginPath(); poly.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y))); ctx.stroke(); ctx.setLineDash([])
+      ctx.fillStyle = '#fff'; ctx.strokeStyle = '#8b5cf6'
+      layer.path.pts.forEach((q) => { ctx.beginPath(); ctx.arc(q.x, q.y, 6 / view.s, 0, Math.PI * 2); ctx.fill(); ctx.stroke() })
+      ctx.restore()
+    }
     if (layer && layer.kind !== 'drawing' && !playing && time >= layer.start && time <= layer.end) {
-      const st = layerState(doc, layer, time)
       const [w, h] = layerSize(layer, doc)
+      const M = new DOMMatrix().translate(view.ox, view.oy).scale(view.s).multiply(worldMatrix(doc, layer, time))
+      const c4 = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]].map(([u, v]) => M.transformPoint(new DOMPoint(u, v)))
       ctx.save()
-      ctx.translate(view.ox + (doc.width / 2 + st.x) * view.s, view.oy + (doc.height / 2 + st.y) * view.s)
-      ctx.rotate((st.rot * Math.PI) / 180)
-      ctx.strokeStyle = '#3d8bff'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4])
-      ctx.strokeRect((-w / 2) * st.sx * view.s, (-h / 2) * st.sy * view.s, w * st.sx * view.s, h * st.sy * view.s)
-      ctx.setLineDash([]); ctx.fillStyle = '#3d8bff'
-      ctx.fillRect((w / 2) * st.sx * view.s - 5, (h / 2) * st.sy * view.s - 5, 10, 10)
+      ctx.strokeStyle = '#8b5cf6'; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4])
+      ctx.beginPath(); c4.forEach((q, i) => (i ? ctx.lineTo(q.x, q.y) : ctx.moveTo(q.x, q.y))); ctx.closePath(); ctx.stroke()
+      ctx.setLineDash([]); ctx.fillStyle = '#8b5cf6'
+      ctx.fillRect(c4[2].x - 5, c4[2].y - 5, 10, 10)
+      if (layer.parentId) { const par = doc.layers.find((x) => x.id === layer.parentId); if (par) { const pm = new DOMMatrix().translate(view.ox, view.oy).scale(view.s).multiply(worldMatrix(doc, par, time)).transformPoint(new DOMPoint(0, 0)); const cm = M.transformPoint(new DOMPoint(0, 0)); ctx.strokeStyle = '#c084fc88'; ctx.beginPath(); ctx.moveTo(cm.x, cm.y); ctx.lineTo(pm.x, pm.y); ctx.stroke() } }
       ctx.restore()
     }
   })
@@ -274,32 +328,52 @@ export function Animator() {
       window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)
       return
     }
+    // motion path drawing / point dragging
+    if (pathMode && layer && layer.kind !== 'drawing') {
+      edit((a) => { const l = a.layers.find((x) => x.id === layer.id)!; l.path = { pts: [...(l.path?.pts ?? []), { x: Math.round(p0.x), y: Math.round(p0.y) }], orient: l.path?.orient ?? false } })
+      return
+    }
+    if (layer?.path && mode === 'select') {
+      const pi = layer.path.pts.findIndex((q) => Math.hypot(q.x - p0.x, q.y - p0.y) < 10 / view.s)
+      if (pi >= 0) {
+        useStore.getState().checkpoint()
+        const move = (ev: PointerEvent) => { const p = toDoc(ev); edit((a) => { const l = a.layers.find((x) => x.id === layer.id)!; l.path!.pts[pi] = { x: Math.round(p.x), y: Math.round(p.y) }; l.path = { ...l.path! } }, false) }
+        const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+        window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)
+        return
+      }
+    }
     // hit test top-most
     let hit: AnimLayer | undefined
     let handle = false
     for (const l of doc.layers) {
       if (!l.visible || l.locked || l.kind === 'drawing' || time < l.start || time > l.end) continue
-      const st = layerState(doc, l, time)
       const [w, h] = layerSize(l, doc)
-      const dx = p0.x - (doc.width / 2 + st.x), dy = p0.y - (doc.height / 2 + st.y)
-      const a = (-st.rot * Math.PI) / 180
-      const lx = (dx * Math.cos(a) - dy * Math.sin(a)) / (st.sx || 1e-3), ly = (dx * Math.sin(a) + dy * Math.cos(a)) / (st.sy || 1e-3)
-      if (l.id === layerId && Math.abs(lx - w / 2) < 14 / view.s / Math.abs(st.sx) && Math.abs(ly - h / 2) < 14 / view.s / Math.abs(st.sy)) { hit = l; handle = true; break }
-      if (Math.abs(lx) <= w / 2 && Math.abs(ly) <= h / 2) { hit = l; break }
+      const inv = worldMatrix(doc, l, time).inverse()
+      const q = inv.transformPoint(new DOMPoint(p0.x, p0.y))
+      const sc = Math.hypot(inv.a, inv.b) / view.s
+      if (l.id === layerId && Math.abs(q.x - w / 2) < 14 * sc && Math.abs(q.y - h / 2) < 14 * sc) { hit = l; handle = true; break }
+      if (Math.abs(q.x) <= w / 2 && Math.abs(q.y) <= h / 2) { hit = l; break }
     }
     if (!hit) { setLayerId(null); return }
     setLayerId(hit.id)
     const l0 = hit
     const ox = layerValue(l0, 'x', time), oy = layerValue(l0, 'y', time), os = layerValue(l0, 'scale', time)
-    const st0 = layerState(doc, l0, time)
-    const d0 = Math.hypot(p0.x - (doc.width / 2 + st0.x), p0.y - (doc.height / 2 + st0.y))
+    const center0 = worldMatrix(doc, l0, time).transformPoint(new DOMPoint(0, 0))
+    const d0 = Math.hypot(p0.x - center0.x, p0.y - center0.y)
+    // convert world-space drags into the parent's space
+    const pinv = parentMatrix(doc, l0, time).inverse()
     useStore.getState().checkpoint()
     const move = (ev: PointerEvent) => {
       const p = toDoc(ev)
       edit((a) => {
         const l = a.layers.find((x) => x.id === l0.id)!
-        if (handle) setProp(l, 'scale', Math.max(0.02, os * (Math.hypot(p.x - (doc.width / 2 + st0.x), p.y - (doc.height / 2 + st0.y)) / Math.max(1, d0))))
-        else { setProp(l, 'x', Math.round(ox + p.x - p0.x)); setProp(l, 'y', Math.round(oy + p.y - p0.y)) }
+        if (handle) setProp(l, 'scale', Math.max(0.02, os * (Math.hypot(p.x - center0.x, p.y - center0.y) / Math.max(1, d0))))
+        else {
+          const dx = p.x - p0.x, dy = p.y - p0.y
+          const lx = pinv.a * dx + pinv.c * dy, ly = pinv.b * dx + pinv.d * dy
+          setProp(l, 'x', Math.round(ox + lx)); setProp(l, 'y', Math.round(oy + ly))
+        }
       }, false)
     }
     const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
@@ -326,6 +400,17 @@ export function Animator() {
         let tr = p.tracks.slice(ti + 1).find((t) => t.kind === 'video' && !p.clips.some((c) => c.trackId === t.id && c.start < ac.start + dur && clipEnd(c) > ac.start))
         if (!tr) { tr = newTrack('video', p.tracks.filter((t) => t.kind === 'video').length + 1); p.tracks.splice(ti + 1, 0, tr) }
         p.clips.push(makeClip('video', tr.id, ac.start, dur, { mediaId: rvm.id, name: rvm.name, inPoint: rv.offset, fit: rv.fit }))
+      })
+    }
+    if (doc.audio && animClipId) {
+      const au = doc.audio
+      const am = useStore.getState().project.media.find((x) => x.id === au.mediaId)
+      if (am) useStore.getState().update((p) => {
+        const ac = p.clips.find((c) => c.id === animClipId)!
+        const dur = Math.min(ac.duration, Math.max(0.1, am.duration - au.offset))
+        let tr = p.tracks.find((t) => t.kind === 'audio' && !p.clips.some((c) => c.trackId === t.id && c.start < ac.start + dur && clipEnd(c) > ac.start))
+        if (!tr) { tr = newTrack('audio', p.tracks.filter((t) => t.kind === 'audio').length + 1); p.tracks.push(tr) }
+        p.clips.push(makeClip('audio', tr.id, ac.start, dur, { mediaId: am.id, name: am.name, inPoint: au.offset, volume: au.volume }))
       })
     }
     st.setTab('video')
@@ -472,6 +557,23 @@ export function Animator() {
             </>
           })()}
         </Section>
+        <Section title="🎵 Soundtrack" defaultOpen={!!doc.audio}>
+          <div className="hint">Animate to music or dialogue (lip-sync). The waveform shows in the timeline.</div>
+          <Select value={doc.audio?.mediaId ?? ''} options={[{ value: '', label: 'None' }, ...project.media.filter((m) => m.kind === 'audio' || (m.kind === 'video' && m.hasAudio)).map((m) => ({ value: m.id, label: m.name }))]}
+            onChange={(v) => edit((a) => { a.audio = v ? { mediaId: v, offset: 0, volume: 1 } : undefined })} />
+          <button onClick={async () => {
+            const [f] = await pickFiles('audio/*', false)
+            if (!f) return
+            const m = await importFile(f)
+            if (!m) return
+            useStore.getState().addMedia(m)
+            edit((a) => { a.audio = { mediaId: m.id, offset: 0, volume: 1 } })
+          }}>＋ Import audio…</button>
+          {doc.audio && <>
+            <Slider label="Start at (s)" min={0} max={Math.max(0.1, (project.media.find((m) => m.id === doc.audio!.mediaId)?.duration ?? 1))} value={doc.audio.offset} onChange={(v) => edit((a) => { a.audio!.offset = v }, false)} />
+            <Slider label="Volume" min={0} max={1.5} value={doc.audio.volume} onChange={(v) => edit((a) => { a.audio!.volume = v }, false)} />
+          </>}
+        </Section>
         <Section title="Animation settings" defaultOpen={false}>
           <div className="grid2">
             <label className="field"><span>W</span><input type="number" value={doc.width} onChange={(e) => edit((a) => { a.width = Math.max(16, +e.target.value) })} /></label>
@@ -537,7 +639,7 @@ export function Animator() {
             <button onClick={() => editLayer((l) => { l.frames?.forEach((f) => { f.hold = layer.frames![frameIdx]?.hold ?? 1 }) })}>Apply hold to all</button>
           </Section>}
           <Section title="Properties  (◆ = keyframe at playhead)">
-            {ANIM_PROPS.map((prop) => {
+            {ANIM_PROPS.filter((pp) => pp !== 'path' || layer.path).map((prop) => {
               const v = layerValue(layer, prop, time)
               const keys = layer.keys[prop] ?? []
               const local = time - layer.start
@@ -563,6 +665,26 @@ export function Animator() {
               }
             })}>{n}</button>)}</div>
           </Section>
+          <Section title="🔗 Parent & motion path">
+            <Select label="Attach to" value={layer.parentId ?? ''} options={[{ value: '', label: 'None' }, ...doc.layers.filter((x) => x.id !== layer.id && !isDescendant(doc, x.id, layer.id)).map((x) => ({ value: x.id, label: x.name }))]}
+              onChange={(v) => edit((a) => { const l = a.layers.find((x) => x.id === layer.id)!; l.parentId = v || undefined })} />
+            <div className="hint">An attached layer follows its parent's movement, rotation and scale (e.g. a hat on a head, a wheel on a car).</div>
+            {layer.kind !== 'drawing' && <>
+              <div className="row">
+                <button className={pathMode ? 'active' : ''} onClick={() => {
+                  if (!pathMode) { edit((a) => { const l = a.layers.find((x) => x.id === layer.id)!; if (!l.path) { l.path = { pts: [], orient: false }; l.base.x = 0; l.base.y = 0; delete l.keys.x; delete l.keys.y } }); setPathMode(true) }
+                  else {
+                    setPathMode(false)
+                    edit((a) => { const l = a.layers.find((x) => x.id === layer.id)!; if (!l.path || l.path.pts.length < 2) { l.path = undefined; return } if (!l.keys.path?.length) l.keys.path = [{ t: 0, value: 0, ease: 'linear' }, { t: l.end - l.start, value: 1, ease: 'easeInOut' }] })
+                  }
+                }}>{pathMode ? '✓ Done drawing path' : layer.path ? '〰 Add points to path' : '〰 Draw motion path'}</button>
+                {layer.path && <button onClick={() => { setPathMode(false); edit((a) => { const l = a.layers.find((x) => x.id === layer.id)!; l.path = undefined; delete l.keys.path }) }}>Clear path</button>}
+              </div>
+              {pathMode && <div className="hint">Click on the stage to add points along the path, then press "Done". Drag the white dots later to reshape it.</div>}
+              {layer.path && <Check label="Rotate to follow the path" value={layer.path.orient} onChange={(v) => edit((a) => { const l = a.layers.find((x) => x.id === layer.id)!; l.path = { ...l.path!, orient: v } })} />}
+              {layer.path && <div className="hint">Speed along the path is the "path" property (0 → 1). Shape the timing in the Graph view.</div>}
+            </>}
+          </Section>
           {layer.kind !== 'drawing' && <Section title="🎯 Motion tracking" defaultOpen={!!doc.refVideo}>
             {!doc.refVideo ? <div className="hint">Add a video underneath (left panel) to track real motion.</div> : <>
               <div className="hint">Move the playhead to where tracking should start, click "Pick point", then click a clear, high-contrast spot in the video (an eye, a logo, a corner). This layer will follow it.</div>
@@ -582,13 +704,19 @@ export function Animator() {
           </Section>
           <div className="section-body">
             <button onClick={() => edit((a) => { const i = a.layers.findIndex((x) => x.id === layer.id); const d = JSON.parse(JSON.stringify(layer)); d.id = nanoid(8); d.name += ' copy'; d.base.x += 40; d.base.y += 40; a.layers.splice(i, 0, d) })}>Duplicate layer</button>
-            <button className="danger" onClick={() => { edit((a) => { a.layers = a.layers.filter((x) => x.id !== layer.id) }); setLayerId(null) }}>Delete layer</button>
+            <button className="danger" onClick={() => { edit((a) => { a.layers = a.layers.filter((x) => x.id !== layer.id); a.layers.forEach((x) => { if (x.parentId === layer.id) x.parentId = undefined }) }); setLayerId(null) }}>Delete layer</button>
           </div>
         </>}
       </div>
 
       {/* TIMELINE */}
       <div className="anim-tl">
+        <div className="row" style={{ padding: '4px 8px', borderBottom: '1px solid var(--line)' }}>
+          <button className={!graph ? 'active' : ''} onClick={() => setGraph(false)}>▤ Keyframes</button>
+          <button className={graph ? 'active' : ''} disabled={!layer} title={layer ? '' : 'Select a layer first'} onClick={() => setGraph(true)}>📈 Graph editor</button>
+          <span className="hint">{graph ? 'Drag points to change value and timing (Shift: time only, Alt: value only). Double-click to add a key.' : 'Drag ◆ keys to retime them. Click a layer name to expand its properties.'}</span>
+        </div>
+        {graph && layer ? <Graph doc={doc} layer={layer} time={time} pps={pps} onSeek={setTime} onEdit={(fn, undo = true) => editLayer((l) => fn(l), undo)} /> :
         <div className="anim-rows">
           <div className="anim-row" style={{ position: 'sticky', top: 0, background: 'var(--panel)', zIndex: 3 }}>
             <div className="rname muted">Time</div>
@@ -598,6 +726,10 @@ export function Animator() {
               ))}
             </div>
           </div>
+          {doc.audio && <div className="anim-row" style={{ height: 34 }}>
+            <div className="rname">🎵 {project.media.find((m) => m.id === doc.audio!.mediaId)?.name ?? 'Audio'}</div>
+            <div className="lane" style={{ minWidth: tlWidth }} onPointerDown={scrub}><AudioLane mediaId={doc.audio.mediaId} offset={doc.audio.offset} duration={doc.duration} width={tlWidth} /></div>
+          </div>}
           {doc.layers.map((l) => {
             const propsWithKeys = ANIM_PROPS.filter((p) => l.keys[p]?.length)
             return (
@@ -626,7 +758,7 @@ export function Animator() {
             )
           })}
           <div style={{ position: 'absolute', top: 0, bottom: 0, left: 180 + timeToX(time), width: 2, background: 'var(--accent)', pointerEvents: 'none', zIndex: 4 }} />
-        </div>
+        </div>}
         {layer?.kind === 'drawing' && <div className="frame-strip">
           {(layer.frames ?? []).map((f, i) => (
             <div key={f.id} className={'frame-thumb ' + (i === frameIdx ? 'on' : '')} onClick={() => {

@@ -140,11 +140,13 @@ export async function exportVideo(p: Project, o: VideoExportOpts, onProgress: Pr
 /** Wrap an animation as a temporary single-clip project for video export. */
 export function animationProject(a: AnimationDoc, bg = '#000000'): Project {
   const tr = newTrack('video', 1)
+  const atr = newTrack('audio', 1)
   const mediaId = 'anim-' + a.id
   return {
     id: 'tmp', name: a.name, width: a.width, height: a.height, fps: a.fps, background: a.background || bg,
-    tracks: [tr], clips: [makeClip('animation', tr.id, 0, a.duration, { mediaId })],
-    media: [{ id: mediaId, name: a.name, kind: 'animation', duration: a.duration, width: a.width, height: a.height, animationId: a.id }],
+    tracks: a.audio ? [tr, atr] : [tr],
+    clips: [makeClip('animation', tr.id, 0, a.duration, { mediaId }), ...(a.audio ? [makeClip('audio', atr.id, 0, a.duration, { mediaId: a.audio.mediaId, inPoint: a.audio.offset, volume: a.audio.volume })] : [])],
+    media: [{ id: mediaId, name: a.name, kind: 'animation', duration: a.duration, width: a.width, height: a.height, animationId: a.id }, ...(a.audio ? [{ id: a.audio.mediaId, name: 'soundtrack', kind: 'audio' as const, duration: a.duration, width: 0, height: 0 }] : [])],
     animations: [a], updatedAt: 0,
   }
 }

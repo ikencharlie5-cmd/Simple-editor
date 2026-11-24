@@ -127,8 +127,8 @@ export interface Project {
 
 /* ---------------- Animator ---------------- */
 
-export type AnimProp = 'x' | 'y' | 'scale' | 'scaleX' | 'scaleY' | 'rotation' | 'opacity' | 'reveal' | 'blur' | 'hue'
-export const ANIM_PROPS: AnimProp[] = ['x', 'y', 'scale', 'scaleX', 'scaleY', 'rotation', 'opacity', 'reveal', 'blur', 'hue']
+export type AnimProp = 'x' | 'y' | 'scale' | 'scaleX' | 'scaleY' | 'rotation' | 'opacity' | 'reveal' | 'blur' | 'hue' | 'path'
+export const ANIM_PROPS: AnimProp[] = ['x', 'y', 'scale', 'scaleX', 'scaleY', 'rotation', 'opacity', 'reveal', 'blur', 'hue', 'path']
 
 export type AnimLayerKind = 'shape' | 'text' | 'image' | 'drawing'
 export type ShapeType = 'rect' | 'ellipse' | 'triangle' | 'star' | 'heart' | 'polygon' | 'line' | 'arrow'
@@ -171,6 +171,10 @@ export interface AnimLayer {
   presetIn?: string
   presetOut?: string
   presetLoop?: string
+  /** attach to another layer: follows its movement, rotation and scale */
+  parentId?: string
+  /** motion path in animation pixels; position follows it by the 'path' property (0..1) */
+  path?: { pts: { x: number; y: number }[]; orient: boolean }
 }
 
 export interface AnimationDoc {
@@ -184,6 +188,7 @@ export interface AnimationDoc {
   layers: AnimLayer[]
   onionSkin: boolean
   /** a video shown underneath the animation for reference / rotoscoping */
+  audio?: { mediaId: string; offset: number; volume: number }
   refVideo?: { mediaId: string; offset: number; opacity: number; fit: 'contain' | 'cover'; include: boolean }
 }
 

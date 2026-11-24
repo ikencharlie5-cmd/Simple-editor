@@ -158,7 +158,7 @@ function AnimationCard() {
         const name = safe(anim?.name ?? project.name)
         if (fmt === 'webm' || fmt === 'mp4') {
           const p = anim ? animationProject(anim) : project
-          const blob = await exportVideo(p, { format: fmt, height: Math.round((anim?.height ?? project.height) * scale / 2) * 2, fps: anim?.fps ?? project.fps, bitrate: 8e6, from: 0, to: dur, audio: !anim }, pr, sig)
+          const blob = await exportVideo(p, { format: fmt, height: Math.round((anim?.height ?? project.height) * scale / 2) * 2, fps: anim?.fps ?? project.fps, bitrate: 8e6, from: 0, to: dur, audio: true }, pr, sig)
           downloadBlob(blob, `${name}.${fmt}`); return
         }
         if (!anim) await ensureVideos(project)
