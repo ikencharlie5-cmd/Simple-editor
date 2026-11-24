@@ -285,7 +285,7 @@ function Preview() {
     const c = st.project.clips.find((x) => x.id === st.selectedClipIds[0])
     if (!c || c.kind === 'audio') return
     const r = e.currentTarget.getBoundingClientRect()
-    const k = project.width / r.width
+    const k = 1 / Math.min(r.width / project.width, r.height / project.height)
     const sx = e.clientX, sy = e.clientY
     const ox = c.transform.x, oy = c.transform.y
     st.checkpoint()
