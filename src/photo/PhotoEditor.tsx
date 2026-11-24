@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { doc, bump, usePhoto, makeCanvas, ctx2d, BLENDS, BLEND_LABELS, loadPhotoDoc, renderLive, rasterize, newMask, type Layer } from './doc'
 import { DEFAULT_STYLES, type LayerStyles } from './live'
+import { PHOTO_TEMPLATES, applyPhotoTemplate } from './templates'
 import { TOOL_GROUPS, toolDef, groupOf, type ToolId, BRUSH_TOOLS, BRUSH_PRESETS } from './toolDefs'
 import { ts, setTool, onDown, onMove, onUp, drawOverlay, applyPending, commitText, cancelTransient, straightenFromRuler, sampleColorAt, drawFramePlaceholder, pathToPath2D, pathMask, eyedrop, startTransform, cancelTransform, setXform } from './tools'
 import { FILTERS, applyFilterMasked, type FilterDef } from './filters'
@@ -426,6 +427,10 @@ function Dialogs({ d, onClose }: { d: Dialog; onClose: () => void }) {
       <div className="row"><label className="field"><span>Width</span><input type="number" value={a} onChange={(e) => setA(+e.target.value)} /></label><label className="field"><span>Height</span><input type="number" value={b} onChange={(e) => setB(+e.target.value)} /></label></div>
       <Select label="Background" value={s} options={[{ value: '#ffffff', label: 'White' }, { value: '#000000', label: 'Black' }, { value: '', label: 'Transparent' }]} onChange={setS} />
       {footer(() => { doc.reset(Math.max(1, a), Math.max(1, b), s || null); doc.name = 'Untitled'; fitView() })}
+      <hr style={{ borderColor: 'var(--line)', width: '100%' }} />
+      <b>Or start from a template</b>
+      <div className="hint">Every text and shape stays editable.</div>
+      <div className="grid2">{PHOTO_TEMPLATES.map((t, i) => <button key={t.name} onClick={() => { applyPhotoTemplate(i); setTimeout(fitView, 30); onClose() }}>{t.name}<br /><span className="muted small">{t.w}×{t.h}</span></button>)}</div>
     </Modal>
   )
   if (d.kind === 'imagesize') return (
@@ -685,8 +690,8 @@ function RightPanels() {
         <button className="icon" title="New layer" onClick={() => { doc.addLayer(); doc.commit('New Layer') }}>＋</button>
         <button className="icon" title="Duplicate (Ctrl+J)" onClick={layerViaCopy}>⧉</button>
         <button className="icon" title="Merge down (Ctrl+E)" onClick={mergeDown}>⤓</button>
-        <button className="icon" title="Add mask (from selection if there is one)" onClick={() => addMask(doc.selection ? 'selection' : 'reveal')}>◐</button>
-        <button className="icon" title="New adjustment layer" onClick={() => openDialogGlobal?.({ kind: 'newadjust' })}>☯</button>
+        <button className="icon" title="Add mask (from selection if there is one)" onClick={() => addMask(doc.selection ? 'selection' : 'reveal')}>🎭</button>
+        <button className="icon" title="New adjustment layer" onClick={() => openDialogGlobal?.({ kind: 'newadjust' })}>🎚</button>
         <button className="icon" title="Layer styles (fx)" onClick={() => openDialogGlobal?.({ kind: 'styles' })}>fx</button>
         <button className="icon" title="Delete" onClick={deleteLayer}>🗑</button>
       </div>
@@ -754,6 +759,8 @@ function Viewport() {
   const [typing, setTyping] = useState('')
   const checker = useRef<CanvasPattern | null>(null)
   const typingSince = useRef(0)
+  const touches = useRef(new Map<number, { x: number; y: number }>())
+  const pinch = useRef<null | { d0: number; z0: number; mx: number; my: number; px: number; py: number }>(null)
   const showMask = usePhoto((s) => s.showMask)
 
   useEffect(() => {
@@ -814,6 +821,16 @@ function Viewport() {
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (ts.typing) return
+    if (e.pointerType === 'touch') {
+      touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      if (touches.current.size === 2) {
+        // second finger: switch to pinch-zoom and throw away any half-finished stroke
+        if (ts.start) { ts.start = null; ts.stroke = null; cancelTransient(); doc.restore(doc.historyIndex) }
+        const [a, b] = [...touches.current.values()]
+        pinch.current = { d0: Math.hypot(a.x - b.x, a.y - b.y), z0: view.zoom, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, px: view.panX, py: view.panY }
+        return
+      }
+    }
     wrapRef.current!.setPointerCapture(e.pointerId)
     const p = toDoc(e.clientX, e.clientY)
     const tool = ts.tool
@@ -841,6 +858,16 @@ function Viewport() {
     void onDown(p, e.nativeEvent, view.zoom)
   }
   const onPointerMove = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch' && touches.current.has(e.pointerId)) {
+      touches.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
+      const pc = pinch.current
+      if (pc && touches.current.size >= 2) {
+        const [a, b] = [...touches.current.values()]
+        const z = Math.min(64, Math.max(0.02, pc.z0 * (Math.hypot(a.x - b.x, a.y - b.y) / Math.max(1, pc.d0))))
+        usePhoto.setState({ view: { ...view, zoom: z, panX: pc.px + (a.x + b.x) / 2 - pc.mx, panY: pc.py + (a.y + b.y) / 2 - pc.my } })
+        return
+      }
+    }
     const d = ts.dragView
     if (d) {
       if (ts.tool === 'rotate-view' && !ts.spaceHeld) {
@@ -857,6 +884,10 @@ function Viewport() {
     for (const ev of evs.length ? evs : [e.nativeEvent]) onMove(toDoc(ev.clientX, ev.clientY), ev, view.zoom)
   }
   const onPointerUp = (e: React.PointerEvent) => {
+    if (e.pointerType === 'touch') {
+      touches.current.delete(e.pointerId)
+      if (pinch.current) { if (touches.current.size < 2) pinch.current = null; return }
+    }
     if (ts.dragView) { ts.dragView = null; return }
     void onUp(toDoc(e.clientX, e.clientY), e.nativeEvent)
   }

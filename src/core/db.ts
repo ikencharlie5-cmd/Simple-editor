@@ -10,3 +10,5 @@ export const blobKeys = () => keys(blobs)
 
 export const saveDoc = <T>(id: string, value: T) => set(id, value, docs)
 export const loadDoc = <T>(id: string) => get<T>(id, docs)
+export const deleteDoc = (id: string) => del(id, docs)
+export const docKeys = () => keys(docs)

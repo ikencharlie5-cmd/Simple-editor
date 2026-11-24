@@ -16,13 +16,17 @@ npm run build      # production build in dist/
 
 | Tab | What it does |
 | --- | --- |
-| 🖼 **Photo** | A Photoshop-style editor with layers, blend modes, selections, history, adjustments, filters and the full tool set below. |
-| 🎬 **Video** | A CapCut-style editor: multi-track timeline, split/trim/ripple, speed, volume and fades, text and stickers, filters, adjustments, transitions, in/out/loop animations, keyframes, chroma key, aspect-ratio presets. |
-| 🎵 **Audio** | Import music, 17 built-in royalty-free sounds and loops, voiceover recording, waveform range picking, "fit to video length", and a mixer. |
-| 🐔 **Animator** | Keyframe motion graphics, frame-by-frame drawing with onion skin, and one-click presets. **Send to video editor** stays live-linked: edits in the Animator update the clip in your video. |
+| 🖼 **Photo** | Photoshop-style editor: 70+ tools, layers, blend modes, **editable text and shapes**, **Free Transform** (Ctrl+T), **layer masks**, **adjustment layers**, **layer styles** (shadow, stroke, glow, overlay), **brush presets** and stylus pressure, selections, history, filters, and templates (thumbnail, quote, poster, banners). |
+| 🎬 **Video** | CapCut-style editor: multi-track timeline, split/trim/ripple, text, stickers, filters, transitions, keyframes, chroma key, **AI background removal**, **auto-captions**, **reverse**, **freeze frame**, **speed curves**, on-preview **resize/rotate handles**, **markers / beat detection / cut to beats**. |
+| 🎵 **Audio** | Import music, built-in royalty-free sounds and loops, voiceover recording, **voice effects** (deep, chipmunk, robot, echo, radio…), **noise reduction**, EQ, loudness normalize, **auto-ducking**, beat detection with BPM, and a mixer. |
+| 🐔 **Animator** | Keyframes, frame-by-frame drawing with onion skin, presets, **motion paths**, **graph editor**, **parenting**, **soundtrack** for lip-sync, and **a video underneath** to animate over with **motion tracking**. Send to the video editor, live-linked. |
 | ⬇ **Export** | MP4/WebM/MOV video, GIF/APNG/sprite sheet, PNG/JPG/WebP (and photo slices), MP3/WAV audio, and `.chiken` project files. |
 
+**Polish:** multiple projects (📂 Projects), video templates (YouTube intro, slideshow, promo, meme, talking video), a first-run tour, a help and shortcuts screen (press `?`), and a touch-friendly layout with slide-out panels on small screens and pinch-zoom in Photo.
+
 Your work autosaves in the browser (IndexedDB). Use **Export → Project file** to back it up or move it to another computer.
+
+**AI features run on your device.** Background removal uses a bundled MediaPipe selfie-segmentation model. Auto-captions download a Whisper speech model the first time (needs internet once), then work offline.
 
 ## Photo tools and shortcuts
 
