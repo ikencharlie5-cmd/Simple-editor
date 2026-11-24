@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { doc, bump, usePhoto, makeCanvas, ctx2d, BLENDS, BLEND_LABELS, loadPhotoDoc } from './doc'
-import { TOOL_GROUPS, toolDef, groupOf, type ToolId, BRUSH_TOOLS } from './toolDefs'
-import { ts, setTool, onDown, onMove, onUp, drawOverlay, applyPending, commitText, cancelTransient, straightenFromRuler, sampleColorAt, drawFramePlaceholder, pathToPath2D, pathMask, eyedrop } from './tools'
+import { doc, bump, usePhoto, makeCanvas, ctx2d, BLENDS, BLEND_LABELS, loadPhotoDoc, renderLive, rasterize, newMask, type Layer } from './doc'
+import { DEFAULT_STYLES, type LayerStyles } from './live'
+import { TOOL_GROUPS, toolDef, groupOf, type ToolId, BRUSH_TOOLS, BRUSH_PRESETS } from './toolDefs'
+import { ts, setTool, onDown, onMove, onUp, drawOverlay, applyPending, commitText, cancelTransient, straightenFromRuler, sampleColorAt, drawFramePlaceholder, pathToPath2D, pathMask, eyedrop, startTransform, cancelTransform, setXform } from './tools'
 import { FILTERS, applyFilterMasked, type FilterDef } from './filters'
 import { blurMask, morphMask, maskBounds, objectSelect, rgbToHex } from './algos'
-import { Modal, Slider, Select } from '../ui/controls'
+import { Modal, Slider, Select, Color } from '../ui/controls'
 import { pickFiles, importFile } from '../core/media'
 import { useStore } from '../core/store'
 
@@ -116,19 +117,20 @@ function layerViaCopy() {
 function mergeDown() {
   if (doc.active === 0) return
   const top = doc.layer, below = doc.layers[doc.active - 1]
-  const x = ctx2d(below.canvas)
-  x.globalAlpha = top.opacity; x.globalCompositeOperation = top.blend
-  if (top.visible) x.drawImage(top.canvas, 0, 0)
-  x.globalAlpha = 1; x.globalCompositeOperation = 'source-over'
+  const merged = doc.renderLayers([{ ...below, opacity: 1, blend: 'source-over', visible: true }, top])
+  below.canvas = merged
+  below.mask = null; below.styles = undefined; below.kind = 'raster'; below.text = undefined; below.shape = undefined; below.adjust = undefined
   doc.layers.splice(doc.active, 1)
   doc.active--
+  doc.maskEdit = false
   doc.commit('Merge Down')
 }
 function flatten() {
   const c = makeCanvas(doc.width, doc.height), x = ctx2d(c)
   x.fillStyle = '#fff'; x.fillRect(0, 0, doc.width, doc.height)
   x.drawImage(doc.composite(), 0, 0)
-  doc.layers = [{ ...doc.layers[0], name: 'Background', canvas: c, opacity: 1, blend: 'source-over', visible: true, frame: undefined }]
+  doc.layers = [{ id: doc.layers[0].id, name: 'Background', canvas: c, opacity: 1, blend: 'source-over', visible: true, locked: false }]
+  doc.maskEdit = false
   doc.active = 0
   doc.commit('Flatten Image')
 }
@@ -179,7 +181,8 @@ function MenuBar({ onDialog }: { onDialog: (d: Dialog) => void }) {
       { label: 'Fill with foreground', key: 'Alt+Del', action: () => fillSel(usePhoto.getState().fg) },
       { label: 'Fill with background', key: 'Ctrl+Del', action: () => fillSel(usePhoto.getState().bg) },
       { label: 'Stroke selection…', action: () => onDialog({ kind: 'stroke' }) },
-      { label: 'Transform layer…', key: 'Ctrl+T', action: () => onDialog({ kind: 'transform' }) },
+      { label: 'Free Transform', key: 'Ctrl+T', action: startTransform },
+      { label: 'Transform (numeric)…', key: 'Ctrl+Shift+T', action: () => onDialog({ kind: 'transform' }) },
       { label: 'Flip layer horizontal', action: () => flipImage(true, true) },
       { label: 'Flip layer vertical', action: () => flipImage(false, true) },
     ],
@@ -201,6 +204,17 @@ function MenuBar({ onDialog }: { onDialog: (d: Dialog) => void }) {
       { label: 'Delete layer', action: () => deleteLayer() },
       { label: 'Merge down', key: 'Ctrl+E', action: mergeDown },
       { label: 'Flatten image', action: flatten },
+      { label: 'Rasterize layer', disabled: !(doc.layer?.kind === 'text' || doc.layer?.kind === 'shape'), action: () => { if (rasterize(doc.layer)) doc.commit('Rasterize') } },
+      '-',
+      { label: 'New adjustment layer…', action: () => onDialog({ kind: 'newadjust' }) },
+      { label: 'Layer styles (fx)…', action: () => onDialog({ kind: 'styles' }) },
+      '-',
+      { label: 'Add mask: reveal all', action: () => addMask('reveal') },
+      { label: 'Add mask: from selection', disabled: !doc.selection, action: () => addMask('selection') },
+      { label: 'Add mask: hide all', action: () => addMask('hide') },
+      { label: 'Apply mask', disabled: !doc.layer?.mask, action: applyMask },
+      { label: 'Delete mask', disabled: !doc.layer?.mask, action: () => { doc.layer.mask = null; doc.maskEdit = false; doc.commit('Delete mask') } },
+      { label: doc.layer?.maskEnabled === false ? 'Enable mask' : 'Disable mask', disabled: !doc.layer?.mask, action: () => { doc.layer.maskEnabled = doc.layer.maskEnabled === false; doc.commit('Toggle mask', []) } },
       '-',
       { label: 'Place image in frame…', disabled: !doc.layer?.frame, action: () => void openImage(true) },
       { label: 'Rasterize frame (remove frame link)', disabled: !doc.layer?.frame, action: () => { doc.layer.frame = undefined; doc.commit('Rasterize frame') } },
@@ -244,6 +258,25 @@ function MenuBar({ onDialog }: { onDialog: (d: Dialog) => void }) {
   )
 }
 
+function addMask(mode: 'reveal' | 'selection' | 'hide') {
+  const l = doc.layer
+  if (mode === 'selection' && doc.selection) { l.mask = newMask(doc.width, doc.height, doc.selection); doc.setSelection(null) }
+  else { l.mask = newMask(doc.width, doc.height); if (mode === 'hide') { const x = ctx2d(l.mask); x.fillStyle = '#000'; x.fillRect(0, 0, doc.width, doc.height) } }
+  l.maskEnabled = true
+  doc.maskEdit = true
+  doc.commit('Add mask')
+  notify('Mask added. Paint black to hide, white to reveal. Click the layer thumbnail to go back to painting pixels.')
+}
+function applyMask() {
+  const l = doc.layer
+  if (!l.mask) return
+  rasterize(l)
+  const d = doc.layerData(l), m = ctx2d(l.mask).getImageData(0, 0, doc.width, doc.height).data
+  for (let i = 0; i < d.data.length; i += 4) d.data[i + 3] = (d.data[i + 3] * m[i]) / 255
+  ctx2d(l.canvas).putImageData(d, 0, 0)
+  l.mask = null; doc.maskEdit = false
+  doc.commit('Apply mask')
+}
 function deleteLayer() {
   if (doc.layers.length <= 1) return notify("Can't delete the only layer")
   doc.layers.splice(doc.active, 1)
@@ -261,7 +294,7 @@ function runFilter(f: FilterDef, v: Record<string, number>) {
 }
 
 /* ------------------------- Dialogs ------------------------- */
-type Dialog = { kind: 'new' } | { kind: 'filter'; filter: FilterDef } | { kind: 'imagesize' } | { kind: 'canvassize' } | { kind: 'feather' } | { kind: 'expand'; sign: 1 | -1 } | { kind: 'stroke' } | { kind: 'transform' }
+type Dialog = { kind: 'newadjust' } | { kind: 'editadjust'; layerId: string } | { kind: 'styles' } | { kind: 'new' } | { kind: 'filter'; filter: FilterDef } | { kind: 'imagesize' } | { kind: 'canvassize' } | { kind: 'feather' } | { kind: 'expand'; sign: 1 | -1 } | { kind: 'stroke' } | { kind: 'transform' }
 
 function FilterDialog({ f, onClose }: { f: FilterDef; onClose: () => void }) {
   const [v, setV] = useState<Record<string, number>>(() => Object.fromEntries(f.params.map((p) => [p.key, p.def])))
@@ -289,6 +322,65 @@ function FilterDialog({ f, onClose }: { f: FilterDef; onClose: () => void }) {
   )
 }
 
+let openDialogGlobal: ((d: Dialog) => void) | null = null
+
+function AdjustDialog({ layerId, onClose }: { layerId: string; onClose: () => void }) {
+  const l = doc.layers.find((x) => x.id === layerId)
+  const [, force] = useState(0)
+  const f = FILTERS.find((x) => x.id === l?.adjust?.filterId)
+  if (!l || !f || !l.adjust) return null
+  return (
+    <Modal title={`Adjustment: ${f.name.replace('…', '')}`} onClose={() => { doc.commit('Edit adjustment', []); onClose() }}>
+      {f.params.map((p) => <Slider key={p.key} label={p.label} min={p.min} max={p.max} step={p.step} value={l.adjust!.values[p.key] ?? p.def}
+        onChange={(v) => { l.adjust!.values[p.key] = v; bump(); force((x) => x + 1) }} />)}
+      {!f.params.length && <div className="hint">This adjustment has no settings.</div>}
+      <div className="row" style={{ justifyContent: 'flex-end' }}><button className="primary" onClick={() => { doc.commit('Edit adjustment', []); onClose() }}>Done</button></div>
+    </Modal>
+  )
+}
+
+function StylesDialog({ onClose }: { onClose: () => void }) {
+  const l = doc.layer
+  const [, force] = useState(0)
+  if (!l.styles) l.styles = DEFAULT_STYLES()
+  const st = l.styles
+  const set = (fn: (s: LayerStyles) => void) => { fn(st); bump(); force((x) => x + 1) }
+  const done = () => { doc.commit('Layer styles', [l.id]); onClose() }
+  return (
+    <Modal title={`Layer styles: ${l.name}`} onClose={done}>
+      <label className="check"><input type="checkbox" checked={st.shadow.on} onChange={(e) => set((s) => { s.shadow.on = e.target.checked })} /> <b>Drop shadow</b></label>
+      {st.shadow.on && <>
+        <div className="row"><Color label="Colour" value={st.shadow.color} onChange={(v) => set((s) => { s.shadow.color = v })} /></div>
+        <Slider label="Opacity" min={0} max={1} value={st.shadow.opacity} onChange={(v) => set((s) => { s.shadow.opacity = v })} />
+        <Slider label="Blur" min={0} max={100} step={1} value={st.shadow.blur} onChange={(v) => set((s) => { s.shadow.blur = v })} />
+        <Slider label="Offset X" min={-100} max={100} step={1} value={st.shadow.dx} onChange={(v) => set((s) => { s.shadow.dx = v })} />
+        <Slider label="Offset Y" min={-100} max={100} step={1} value={st.shadow.dy} onChange={(v) => set((s) => { s.shadow.dy = v })} />
+      </>}
+      <label className="check"><input type="checkbox" checked={st.stroke.on} onChange={(e) => set((s) => { s.stroke.on = e.target.checked })} /> <b>Stroke (outline)</b></label>
+      {st.stroke.on && <>
+        <div className="row"><Color label="Colour" value={st.stroke.color} onChange={(v) => set((s) => { s.stroke.color = v })} /></div>
+        <Slider label="Width" min={1} max={40} step={1} value={st.stroke.width} onChange={(v) => set((s) => { s.stroke.width = v })} />
+        <Slider label="Opacity" min={0} max={1} value={st.stroke.opacity} onChange={(v) => set((s) => { s.stroke.opacity = v })} />
+      </>}
+      <label className="check"><input type="checkbox" checked={st.glow.on} onChange={(e) => set((s) => { s.glow.on = e.target.checked })} /> <b>Outer glow</b></label>
+      {st.glow.on && <>
+        <div className="row"><Color label="Colour" value={st.glow.color} onChange={(v) => set((s) => { s.glow.color = v })} /></div>
+        <Slider label="Size" min={1} max={120} step={1} value={st.glow.blur} onChange={(v) => set((s) => { s.glow.blur = v })} />
+        <Slider label="Opacity" min={0} max={1} value={st.glow.opacity} onChange={(v) => set((s) => { s.glow.opacity = v })} />
+      </>}
+      <label className="check"><input type="checkbox" checked={st.overlay.on} onChange={(e) => set((s) => { s.overlay.on = e.target.checked })} /> <b>Colour overlay</b></label>
+      {st.overlay.on && <>
+        <div className="row"><Color label="Colour" value={st.overlay.color} onChange={(v) => set((s) => { s.overlay.color = v })} /></div>
+        <Slider label="Opacity" min={0} max={1} value={st.overlay.opacity} onChange={(v) => set((s) => { s.overlay.opacity = v })} />
+      </>}
+      <div className="row" style={{ justifyContent: 'space-between' }}>
+        <button onClick={() => set((s) => { Object.assign(s, DEFAULT_STYLES()) })}>Clear all</button>
+        <button className="primary" onClick={done}>Done</button>
+      </div>
+    </Modal>
+  )
+}
+
 function Dialogs({ d, onClose }: { d: Dialog; onClose: () => void }) {
   const [a, setA] = useState(0)
   const [b, setB] = useState(0)
@@ -304,6 +396,25 @@ function Dialogs({ d, onClose }: { d: Dialog; onClose: () => void }) {
     if (d.kind === 'transform') { setA(100); setB(0); setC(100) }
   }, [d])
   if (d.kind === 'filter') return <FilterDialog f={d.filter} onClose={onClose} />
+  if (d.kind === 'newadjust') return (
+    <Modal title="New adjustment layer" onClose={onClose}>
+      <div className="hint">Adjustment layers change everything below them without touching pixels. Edit, hide or mask them any time.</div>
+      <div className="grid2">{FILTERS.filter((f) => f.menu === 'Adjustments' || f.id === 'gblur').map((f) => (
+        <button key={f.id} onClick={() => {
+          const l = doc.addLayer(f.name.replace('…', ''))
+          l.kind = 'adjust'; l.adjust = { filterId: f.id, values: Object.fromEntries(f.params.map((q) => [q.key, q.def])) }
+          l.mask = newMask(doc.width, doc.height); l.maskEnabled = true
+          if (doc.selection) { l.mask = newMask(doc.width, doc.height, doc.selection); doc.setSelection(null) }
+          doc.maskEdit = false
+          doc.commit('New adjustment layer')
+          onClose()
+          if (f.params.length) setTimeout(() => openDialogGlobal?.({ kind: 'editadjust', layerId: l.id }))
+        }}>{f.name.replace('…', '')}</button>
+      ))}</div>
+    </Modal>
+  )
+  if (d.kind === 'editadjust') return <AdjustDialog layerId={d.layerId} onClose={onClose} />
+  if (d.kind === 'styles') return <StylesDialog onClose={onClose} />
   const footer = (ok: () => void) => <div className="row" style={{ justifyContent: 'flex-end' }}><button onClick={onClose}>Cancel</button><button className="primary" onClick={() => { ok(); onClose() }}>OK</button></div>
   if (d.kind === 'new') return (
     <Modal title="New document" onClose={onClose}>
@@ -412,8 +523,28 @@ function OptionsBar() {
   useVersion()
   const [, force] = useState(0)
   const o = ts.opts
-  const set = <K extends keyof typeof o>(k: K, v: (typeof o)[K]) => { o[k] = v; force((x) => x + 1); bump() }
   const t = ts.tool
+  const al: Layer | undefined = doc.layer
+  const liveText = al?.kind === 'text' && al.text && (t.startsWith('type-') || t === 'move') ? al : null
+  const liveShape = al?.kind === 'shape' && al.shape && (t.startsWith('shape-') || t === 'move') ? al : null
+  const set = <K extends keyof typeof o>(k: K, v: (typeof o)[K]) => {
+    o[k] = v; force((x) => x + 1)
+    if (liveText?.text) {
+      const map: Partial<Record<keyof typeof o, keyof NonNullable<Layer['text']>>> = { fontFamily: 'font', fontSize: 'size', bold: 'bold', italic: 'italic', align: 'align', lineHeight: 'lineHeight', letterSpacing: 'letterSpacing' }
+      const key = map[k]
+      if (key) { (liveText.text as unknown as Record<string, unknown>)[key] = v; renderLive(liveText); doc.commit('Edit text', [liveText.id]); return }
+    }
+    if (liveShape?.shape) {
+      const map: Partial<Record<keyof typeof o, keyof NonNullable<Layer['shape']>>> = { shapeFill: 'fill', shapeStroke: 'stroke', strokeWidth: 'strokeWidth', sides: 'sides', customShape: 'custom', radius: 'radius' }
+      const key = map[k]
+      if (key) { (liveShape.shape as unknown as Record<string, unknown>)[key] = v; renderLive(liveShape); doc.commit('Edit shape', [liveShape.id]); return }
+    }
+    bump()
+  }
+  const setLiveColor = (prop: 'color' | 'fillColor' | 'strokeColor', v: string) => {
+    if (prop === 'color' && liveText?.text) { liveText.text.color = v; renderLive(liveText); bump() }
+    else if (liveShape?.shape && prop !== 'color') { liveShape.shape[prop] = v; renderLive(liveShape); bump() }
+  }
   const def = toolDef(t)
   const num = (k: keyof typeof o, label: string, min: number, max: number, step = 1) => (
     <label key={k}>{label} <input type="range" min={min} max={max} step={step} value={o[k] as number} onChange={(e) => set(k, +e.target.value as never)} />
@@ -426,6 +557,26 @@ function OptionsBar() {
       <span className="tool-name">{def.icon} {def.name}</span>
       {sel && <span className="row" style={{ gap: 2 }}>{(['new', 'add', 'subtract', 'intersect'] as const).map((m) => <button key={m} className={o.selMode === m ? 'active' : ''} title={m} onClick={() => set('selMode', m)}>{{ new: '▢', add: '⊞', subtract: '⊟', intersect: '⊠' }[m]}</button>)}</span>}
       {sel && !['magic-wand', 'quick-select', 'selection-brush'].includes(t) && num('feather', 'Feather', 0, 100)}
+      {ts.xform && <>
+        <span className="muted">Transform:</span>
+        <label>W% <input type="number" value={Math.round(ts.xform.sx * 100)} onChange={(e) => setXform({ sx: (+e.target.value || 1) / 100 })} /></label>
+        <label>H% <input type="number" value={Math.round(ts.xform.sy * 100)} onChange={(e) => setXform({ sy: (+e.target.value || 1) / 100 })} /></label>
+        <label>Angle <input type="number" value={Math.round(ts.xform.rot)} onChange={(e) => setXform({ rot: +e.target.value || 0 })} /></label>
+        <button onClick={() => setXform({ sx: -ts.xform!.sx })}>⇋ Flip</button>
+        <button className="primary" onClick={() => applyPending()}>✓ Apply</button><button onClick={cancelTransform}>✕ Cancel</button>
+      </>}
+      {doc.maskEdit && <span style={{ color: '#c084fc' }}>◐ Painting on mask (black hides, white shows)</span>}
+      {['brush', 'pencil', 'eraser', 'clone-stamp', 'pattern-stamp', 'history-brush', 'mixer-brush', 'adjust-brush', 'dodge', 'burn', 'sponge', 'blur', 'sharpen', 'smudge', 'color-replace'].includes(t) && <>
+        <Select value="" options={[{ value: '', label: 'Brush preset…' }, ...BRUSH_PRESETS.map((b) => ({ value: b.name, label: b.name }))]} onChange={(v) => {
+          const b = BRUSH_PRESETS.find((x) => x.name === v); if (!b) return
+          Object.assign(o, { size: b.size, hardness: b.hardness, flow: b.flow, opacity: b.opacity, tip: b.tip, spacing: b.spacing, scatter: b.scatter, angle: b.angle ?? o.angle }); force((x) => x + 1); bump()
+        }} />
+        {t !== 'pencil' && <Select label="Tip" value={o.tip} options={['round', 'square', 'flat', 'chalk', 'spray'] as const} onChange={(v) => set('tip', v)} />}
+        {o.tip === 'flat' && num('angle', 'Angle', 0, 180)}
+        {num('spacing', 'Spacing', 0.02, 1.5, 0.01)}
+        {num('scatter', 'Scatter', 0, 2, 0.01)}
+        <label title="Use stylus pressure for size and opacity"><input type="checkbox" checked={o.pressure} onChange={(e) => set('pressure', e.target.checked)} /> Pressure</label>
+      </>}
       {brushy && num('size', 'Size', 1, 500)}
       {brushy && !['pencil', 'red-eye'].includes(t) && num('hardness', 'Hardness', 0, 1, 0.01)}
       {['brush', 'pencil', 'eraser', 'clone-stamp', 'heal', 'pattern-stamp', 'history-brush', 'art-history', 'adjust-brush', 'color-replace', 'gradient', 'bucket', 'magic-eraser', 'selection-brush'].includes(t) && num('opacity', 'Opacity', 0.01, 1, 0.01)}
@@ -446,6 +597,12 @@ function OptionsBar() {
         {t !== 'shape-line' && <label><input type="checkbox" checked={o.shapeStroke} onChange={(e) => set('shapeStroke', e.target.checked)} /> Stroke (BG)</label>}
         {num('strokeWidth', t === 'shape-line' ? 'Weight' : 'Stroke', 1, 100)}
         {t === 'shape-polygon' && num('sides', 'Sides', 3, 24)}
+        {t === 'shape-rect' && num('radius', 'Corners', 0, 300)}
+        {liveShape?.shape && <>
+          <Color label="Fill" value={liveShape.shape.fillColor} onChange={(v) => setLiveColor('fillColor', v)} />
+          <Color label="Stroke" value={liveShape.shape.strokeColor} onChange={(v) => setLiveColor('strokeColor', v)} />
+          <span className="muted small">editing "{liveShape.name}"</span>
+        </>}
         {t === 'shape-custom' && <Select label="Shape" value={o.customShape} options={['star', 'heart', 'arrow', 'bubble', 'check', 'bolt', 'chicken'] as const} onChange={(v) => set('customShape', v)} />}
       </>}
       {t.startsWith('type-') && <>
@@ -453,6 +610,10 @@ function OptionsBar() {
         {num('fontSize', 'Size', 6, 400)}
         <label><input type="checkbox" checked={o.bold} onChange={(e) => set('bold', e.target.checked)} /> B</label>
         <label><input type="checkbox" checked={o.italic} onChange={(e) => set('italic', e.target.checked)} /> I</label>
+        <Select value={o.align} options={['left', 'center', 'right'] as const} onChange={(v) => set('align', v)} />
+        {num('lineHeight', 'Line', 0.6, 3, 0.05)}
+        {num('letterSpacing', 'Spacing', -20, 80)}
+        {liveText?.text && <><Color label="Colour" value={liveText.text.color} onChange={(v) => setLiveColor('color', v)} /><span className="muted small">editing "{liveText.name}". Click the text to retype it.</span></>}
       </>}
       {['eyedropper', 'color-sampler'].includes(t) && <Select label="Sample" value={String(o.sampleSize) as '1' | '3' | '5'} options={[{ value: '1', label: 'Point' }, { value: '3', label: '3×3 avg' }, { value: '5', label: '5×5 avg' }]} onChange={(v) => set('sampleSize', +v as 1 | 3 | 5)} />}
       {t === 'color-sampler' && <button onClick={() => { doc.samplers = []; bump() }}>Clear</button>}
@@ -524,6 +685,9 @@ function RightPanels() {
         <button className="icon" title="New layer" onClick={() => { doc.addLayer(); doc.commit('New Layer') }}>＋</button>
         <button className="icon" title="Duplicate (Ctrl+J)" onClick={layerViaCopy}>⧉</button>
         <button className="icon" title="Merge down (Ctrl+E)" onClick={mergeDown}>⤓</button>
+        <button className="icon" title="Add mask (from selection if there is one)" onClick={() => addMask(doc.selection ? 'selection' : 'reveal')}>◐</button>
+        <button className="icon" title="New adjustment layer" onClick={() => openDialogGlobal?.({ kind: 'newadjust' })}>☯</button>
+        <button className="icon" title="Layer styles (fx)" onClick={() => openDialogGlobal?.({ kind: 'styles' })}>fx</button>
         <button className="icon" title="Delete" onClick={deleteLayer}>🗑</button>
       </div>
       <div className="section-body" style={{ paddingBottom: 4 }}>
@@ -538,10 +702,14 @@ function RightPanels() {
         {[...doc.layers].reverse().map((ly) => {
           const i = doc.layers.indexOf(ly)
           return (
-            <div key={ly.id} className={'layer-row ' + (i === doc.active ? 'on' : '')} onClick={() => { doc.active = i; bump() }}>
+            <div key={ly.id} className={'layer-row ' + (i === doc.active ? 'on' : '')} onClick={() => { if (doc.active !== i) { doc.active = i; doc.maskEdit = !!ly.mask && ly.kind === 'adjust'; bump() } }}>
               <button className="icon" onClick={(e) => { e.stopPropagation(); ly.visible = !ly.visible; doc.commit(ly.visible ? 'Show layer' : 'Hide layer', []) }}>{ly.visible ? '👁' : '🙈'}</button>
-              <LayerThumb c={ly.canvas} />
-              <span className="lname" onDoubleClick={() => { const n = prompt('Layer name', ly.name); if (n) { ly.name = n; doc.commit('Rename', []) } }}>{ly.frame ? '🖼 ' : ''}{ly.name}</span>
+              {ly.kind === 'adjust' ? <span title="Edit adjustment" style={{ width: 36, textAlign: 'center', fontSize: 18 }} onClick={(e) => { e.stopPropagation(); openDialogGlobal?.({ kind: 'editadjust', layerId: ly.id }) }}>☯</span>
+                : <span style={{ outline: i === doc.active && !doc.maskEdit && ly.mask ? '2px solid #8b5cf6' : undefined }} onClick={() => { doc.active = i; doc.maskEdit = false; bump() }}><LayerThumb c={ly.canvas} /></span>}
+              {ly.mask && <span title="Mask: click to paint on it, Shift+click to disable" style={{ outline: i === doc.active && doc.maskEdit ? '2px solid #8b5cf6' : undefined, opacity: ly.maskEnabled === false ? 0.35 : 1 }}
+                onClick={(e) => { e.stopPropagation(); if (e.shiftKey) { ly.maskEnabled = ly.maskEnabled === false; doc.commit('Toggle mask', []); return } doc.active = i; doc.maskEdit = true; bump() }}><LayerThumb c={ly.mask} /></span>}
+              <span className="lname" onDoubleClick={() => { if (ly.kind === 'adjust') { openDialogGlobal?.({ kind: 'editadjust', layerId: ly.id }); return } const n = prompt('Layer name', ly.name); if (n) { ly.name = n; doc.commit('Rename', []) } }}>
+                {ly.kind === 'text' ? 'T ' : ly.kind === 'shape' ? '◆ ' : ''}{ly.frame ? '🖼 ' : ''}{ly.name}{ly.styles && (ly.styles.shadow.on || ly.styles.stroke.on || ly.styles.glow.on || ly.styles.overlay.on) ? ' ·fx' : ''}</span>
               <button className="icon" title="Lock" onClick={(e) => { e.stopPropagation(); ly.locked = !ly.locked; bump() }}>{ly.locked ? '🔒' : ''}</button>
               <button className="icon" title="Move up" disabled={i === doc.layers.length - 1} onClick={(e) => { e.stopPropagation(); doc.layers.splice(i, 1); doc.layers.splice(i + 1, 0, ly); doc.active = i + 1; doc.commit('Reorder', []) }}>▲</button>
               <button className="icon" title="Move down" disabled={i === 0} onClick={(e) => { e.stopPropagation(); doc.layers.splice(i, 1); doc.layers.splice(i - 1, 0, ly); doc.active = i - 1; doc.commit('Reorder', []) }}>▼</button>
@@ -586,6 +754,7 @@ function Viewport() {
   const [typing, setTyping] = useState('')
   const checker = useRef<CanvasPattern | null>(null)
   const typingSince = useRef(0)
+  const showMask = usePhoto((s) => s.showMask)
 
   useEffect(() => {
     const el = wrapRef.current!
@@ -634,19 +803,14 @@ function Viewport() {
     x.save(); x.scale(1 / view.zoom, 1 / view.zoom); x.fillRect(0, 0, doc.width * view.zoom, doc.height * view.zoom); x.restore()
     x.shadowBlur = 0
     x.imageSmoothingEnabled = view.zoom < 2
-    for (const l of doc.layers) {
-      if (!l.visible) continue
-      x.globalAlpha = l.opacity
-      x.globalCompositeOperation = l.blend
-      x.drawImage(l.canvas, 0, 0)
-    }
-    x.globalAlpha = 1; x.globalCompositeOperation = 'source-over'
+    x.drawImage(doc.composite(), 0, 0)
+    if (doc.maskEdit && doc.layer?.mask && showMask) { x.globalAlpha = 0.85; x.drawImage(doc.layer.mask, 0, 0); x.globalAlpha = 1 }
     if (qm) { x.globalAlpha = 0.5; x.drawImage(doc.quickMaskCanvas(), 0, 0); x.globalAlpha = 1 }
     else if (doc.selection && !ts.floating) { const a = doc.antsCanvas(phase); if (a) { x.imageSmoothingEnabled = false; x.drawImage(a, 0, 0) } }
     else if (ts.floating?.selection) { /* hide ants while moving */ }
     drawOverlay(x, view.zoom, phase)
     x.restore()
-  }, [version, view, size, phase, qm])
+  }, [version, view, size, phase, qm, showMask])
 
   const onPointerDown = (e: React.PointerEvent) => {
     if (ts.typing) return
@@ -708,7 +872,8 @@ function Viewport() {
 
   const cursor = ts.spaceHeld || ts.tool === 'hand' ? 'grab' : ts.tool === 'zoom' ? 'zoom-in' : ts.tool === 'move' ? 'move' : ts.tool.startsWith('type') ? 'text' : BRUSH_TOOLS.includes(ts.tool) ? 'none' : 'crosshair'
   const tp = ts.typing ? toScreen(ts.typing) : null
-  useEffect(() => { if (ts.typing) setTyping('') }, [ts.typing])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { if (ts.typing) setTyping(ts.typing.initial ?? '') }, [ts.typing])
   const o = ts.opts
   return (
     <div className="photo-canvas-wrap" ref={wrapRef} style={{ cursor }}
@@ -723,7 +888,7 @@ function Viewport() {
           rows={Math.max(1, typing.split('\n').length)}
           onPointerDown={(e) => e.stopPropagation()}
           onChange={(e) => setTyping(e.target.value)}
-          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') { ts.typing = null; bump() } if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) commitText(typing) }}
+          onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Escape') { const id = ts.typing?.layerId; ts.typing = null; const l = doc.layers.find((q) => q.id === id); if (l) l.visible = true; bump() } if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) commitText(typing) }}
           onBlur={(e) => { if (performance.now() - typingSince.current < 400) { const t = e.currentTarget; setTimeout(() => t.focus()); return } commitText(typing) }} />
       )}
     </div>
@@ -734,6 +899,7 @@ function Viewport() {
 let loadedOnce = false
 export function PhotoEditor() {
   const [dialog, setDialog] = useState<Dialog | null>(null)
+  openDialogGlobal = setDialog
   const screen = usePhoto((s) => s.screenMode)
   const qm = usePhoto((s) => s.quickMask)
   const view = usePhoto((s) => s.view)
@@ -758,7 +924,7 @@ export function PhotoEditor() {
       if (ctrl) {
         const map: Record<string, () => void> = {
           Z: () => (e.shiftKey || e.altKey ? doc.redo() : doc.undo()), Y: () => doc.redo(), A: selectAll, D: deselect, J: layerViaCopy, E: mergeDown,
-          C: () => copySel(), X: () => copySel(true), V: pasteInternal, T: () => setDialog({ kind: 'transform' }), N: () => (e.shiftKey ? (doc.addLayer(), doc.commit('New Layer')) : setDialog({ kind: 'new' })),
+          C: () => copySel(), X: () => copySel(true), V: pasteInternal, T: () => (e.shiftKey ? setDialog({ kind: 'transform' }) : startTransform()), N: () => (e.shiftKey ? (doc.addLayer(), doc.commit('New Layer')) : setDialog({ kind: 'new' })),
           O: () => void openImage(false), '0': fitView, '1': () => usePhoto.setState((s) => ({ view: { ...s.view, zoom: 1 } })), '=': () => zoomBy(1.25), '+': () => zoomBy(1.25), '-': () => zoomBy(0.8),
           BACKSPACE: () => fillSel(usePhoto.getState().bg), DELETE: () => fillSel(usePhoto.getState().bg),
         }
@@ -769,7 +935,8 @@ export function PhotoEditor() {
         if (f) { e.preventDefault(); f() }
         return
       }
-      if (e.key === 'Enter') { if (applyPending()) fitView(); return }
+      if (e.key === 'Enter') { const wasX = !!ts.xform; if (applyPending() && !wasX) fitView(); return }
+      if (e.key === 'Escape' && ts.xform) { cancelTransform(); return }
       if (e.key === 'Escape') { if (ts.tool === 'rotate-view') usePhoto.setState((s) => ({ view: { ...s.view, rot: 0 } })); cancelTransient(); ts.crop = null; doc.activePath = null; bump(); return }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         if (ts.tool === 'slice-select' && doc.activeSlice >= 0) { doc.slices.splice(doc.activeSlice, 1); doc.activeSlice = -1; bump(true); return }

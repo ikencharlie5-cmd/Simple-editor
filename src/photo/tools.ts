@@ -1,5 +1,6 @@
 import { nanoid } from 'nanoid'
-import { doc, bump, usePhoto, makeCanvas, ctx2d, type Anchor, type VPath, type Rect } from './doc'
+import { doc, bump, usePhoto, makeCanvas, ctx2d, renderLive, rasterize, type Anchor, type VPath, type Rect, type Layer } from './doc'
+import { drawText as drawTextProps, textBounds, shapeBounds, customShapePath as liveCustomShape, type TextProps, type ShapeProps, type ShapeKind } from './live'
 import { DEFAULT_OPTIONS, BRUSH_TOOLS, type ToolId, type ToolOptions } from './toolDefs'
 import {
   floodMask, combineMasks, maskFromCanvas, objectSelect, inpaint, warpPerspective, gradientMap, hexToRgb, rgbToHex,
@@ -9,6 +10,14 @@ import { shapePath } from '../animator/render'
 import { useStore } from '../core/store'
 
 type P = { x: number; y: number }
+export interface XForm {
+  layerId: string
+  src: HTMLCanvasElement
+  maskSrc: HTMLCanvasElement | null
+  b: { x: number; y: number; w: number; h: number }
+  tx: number; ty: number; sx: number; sy: number; rot: number
+  drag: null | { mode: 'move' | 'rotate' | 'scale'; hx: number; hy: number; p0: P; o: { tx: number; ty: number; sx: number; sy: number; rot: number } }
+}
 const notify = (m: string) => useStore.getState().notify(m)
 
 /* ======================= transient tool state ======================= */
@@ -27,7 +36,7 @@ export const ts = {
   cloneOffset: null as P | null,
   stroke: null as PixelStroke | null,
   paintMask: null as HTMLCanvasElement | null, // red overlay for remove/heal
-  typing: null as null | { x: number; y: number; vertical: boolean; mask: boolean },
+  typing: null as null | { x: number; y: number; vertical: boolean; mask: boolean; layerId?: string; initial?: string },
   floating: null as null | { canvas: HTMLCanvasElement; base: HTMLCanvasElement; dx: number; dy: number; selection: Mask | null },
   grad: null as Float32Array | null,
   patchMode: null as null | 'draw' | 'drag',
@@ -36,6 +45,9 @@ export const ts = {
   dragView: null as null | { x: number; y: number; panX: number; panY: number; rot: number; ang: number },
   sliceDrag: null as null | { i: number; ox: number; oy: number },
   qsSrc: null as ImageData | null,
+  pressure: 1,
+  liveMove: null as null | { x: number; y: number },
+  xform: null as null | XForm,
   lastPaint: null as P | null,
 }
 
@@ -97,23 +109,36 @@ export class PixelStroke {
   constructor(op: PixelOp, perDab?: (s: PixelStroke, cx: number, cy: number, r: number) => void, onMask = false) {
     this.op = op; this.perDab = perDab; this.onMask = onMask
     this.W = doc.width; this.H = doc.height
-    this.orig = doc.layerData()
+    const pc = doc.paintCanvas()
+    this.orig = ctx2d(pc).getImageData(0, 0, this.W, this.H)
     this.work = new ImageData(Uint8ClampedArray.from(this.orig.data), this.W, this.H)
     this.cov = new Float32Array(this.W * this.H)
   }
   dab(cx: number, cy: number) {
     const o = ts.opts
-    const r = Math.max(0.5, o.size / 2)
+    const pr = o.pressure ? ts.pressure : 1
+    if (o.scatter > 0) { cx += (Math.random() - 0.5) * o.size * o.scatter * 2; cy += (Math.random() - 0.5) * o.size * o.scatter * 2 }
+    const r = Math.max(0.5, (o.size / 2) * (o.pressure ? 0.25 + 0.75 * pr : 1))
     const hard = ts.tool === 'pencil' ? 1 : o.hardness
+    const tip = ts.tool === 'pencil' ? 'round' : o.tip
+    const ang = (o.angle * Math.PI) / 180, ca = Math.cos(ang), sa = Math.sin(ang)
+    const prW = o.pressure ? 0.3 + 0.7 * pr : 1
     this.perDab?.(this, cx, cy, r)
     const x0 = Math.max(0, Math.floor(cx - r)), x1 = Math.min(this.W - 1, Math.ceil(cx + r))
     const y0 = Math.max(0, Math.floor(cy - r)), y1 = Math.min(this.H - 1, Math.ceil(cy + r))
     const sel = doc.selection
     for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
-      const d = Math.hypot(x + 0.5 - cx, y + 0.5 - cy) / r
+      const dx = x + 0.5 - cx, dy = y + 0.5 - cy
+      let d: number
+      if (tip === 'square') d = Math.max(Math.abs(dx), Math.abs(dy)) / r
+      else if (tip === 'flat') { const u = dx * ca + dy * sa, v = -dx * sa + dy * ca; d = Math.hypot(u, v / 0.22) / r }
+      else d = Math.hypot(dx, dy) / r
       if (d > 1) continue
       let w = ts.tool === 'pencil' ? 1 : d <= hard ? 1 : 1 - (d - hard) / (1 - hard + 1e-6)
       w = w * w * (3 - 2 * w)
+      if (tip === 'spray') { if (Math.random() > 0.06) continue; w = 1 }
+      else if (tip === 'chalk') { const n = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453; w *= 0.25 + 0.75 * (n - Math.floor(n)) }
+      w *= prW
       const p = y * this.W + x
       if (sel && !this.onMask && !usePhoto.getState().quickMask) w *= sel[p] / 255
       if (w <= 0) continue
@@ -123,7 +148,7 @@ export class PixelStroke {
     this.dirty.x1 = Math.max(this.dirty.x1, x1); this.dirty.y1 = Math.max(this.dirty.y1, y1)
   }
   line(a: P, b: P) {
-    const spacing = Math.max(1, ts.opts.size * (ts.tool === 'smudge' || ts.tool === 'blur' || ts.tool === 'sharpen' ? 0.12 : 0.2))
+    const spacing = Math.max(1, ts.opts.size * (ts.tool === 'smudge' || ts.tool === 'blur' || ts.tool === 'sharpen' ? 0.12 : ts.opts.spacing))
     const dist = Math.hypot(b.x - a.x, b.y - a.y)
     const n = Math.max(1, Math.ceil(dist / spacing))
     for (let i = 1; i <= n; i++) this.dab(a.x + ((b.x - a.x) * i) / n, a.y + ((b.y - a.y) * i) / n)
@@ -132,7 +157,7 @@ export class PixelStroke {
     if (this.onMask) return
     const { x0, y0, x1, y1 } = this.dirty
     if (x1 < x0) return
-    ctx2d(doc.layer.canvas).putImageData(this.work, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+    ctx2d(doc.paintCanvas()).putImageData(this.work, 0, 0, x0, y0, x1 - x0 + 1, y1 - y0 + 1)
     this.dirty = { x0: Infinity, y0: Infinity, x1: -Infinity, y1: -Infinity }
   }
   /** Photoshop-like coverage: accumulates with flow up to opacity. */
@@ -217,7 +242,7 @@ function buildStroke(tool: ToolId, start: P, e: PointerEvent): PixelStroke | nul
       if (!h || h.width !== doc.width) { notify('History source has a different canvas size'); return null }
       const s = new PixelStroke(() => {})
       s.dab = function (cx, cy) {
-        const ctx = ctx2d(doc.layer.canvas)
+        const ctx = ctx2d(doc.paintCanvas())
         for (let k = 0; k < 8; k++) {
           const px = cx + (Math.random() - 0.5) * o.size * 2, py = cy + (Math.random() - 0.5) * o.size * 2
           if (px < 0 || py < 0 || px >= this.W || py >= this.H) continue
@@ -448,7 +473,7 @@ function paintGradient(a: P, b: P) {
   }
   const sc = doc.selectionCanvas()
   if (sc) { x.globalCompositeOperation = 'destination-in'; x.drawImage(sc, 0, 0) }
-  const lc = ctx2d(layer.canvas)
+  const lc = ctx2d(doc.paintCanvas(layer))
   lc.globalAlpha = o.opacity
   lc.drawImage(tmp, 0, 0)
   lc.globalAlpha = 1
@@ -457,7 +482,8 @@ function paintGradient(a: P, b: P) {
 
 function fillMaskWithColor(m: Mask, label: string, erase = false) {
   const l = doc.layer
-  const d = doc.layerData()
+  const pc = doc.paintCanvas(l)
+  const d = ctx2d(pc).getImageData(0, 0, doc.width, doc.height)
   const [r, g, b] = fgRgb()
   const sel = doc.selection
   for (let p = 0; p < m.length; p++) {
@@ -473,7 +499,7 @@ function fillMaskWithColor(m: Mask, label: string, erase = false) {
     d.data[i + 2] = (b * sa + d.data[i + 2] * da * (1 - sa)) / oa
     d.data[i + 3] = oa * 255
   }
-  ctx2d(l.canvas).putImageData(d, 0, 0)
+  ctx2d(pc).putImageData(d, 0, 0)
   doc.commit(label, [l.id])
 }
 
@@ -496,6 +522,18 @@ export function customShapePath(x: CanvasRenderingContext2D, kind: ToolOptions['
   }
 }
 
+export function shapePropsFrom(tool: ToolId, a: P, b: P, shift: boolean): ShapeProps {
+  const o = ts.opts
+  const { fg, bg } = usePhoto.getState()
+  const kind = tool.replace('shape-', '') as ShapeKind
+  if (kind === 'line') {
+    let ex = b.x, ey = b.y
+    if (shift) { const ang = Math.round(Math.atan2(b.y - a.y, b.x - a.x) / (Math.PI / 4)) * (Math.PI / 4); const len = Math.hypot(b.x - a.x, b.y - a.y); ex = a.x + Math.cos(ang) * len; ey = a.y + Math.sin(ang) * len }
+    return { kind, x: a.x, y: a.y, x2: ex - a.x, y2: ey - a.y, w: 0, h: 0, fill: false, fillColor: fg, stroke: true, strokeColor: fg, strokeWidth: o.strokeWidth, sides: o.sides, custom: o.customShape, radius: 0 }
+  }
+  const r = rectFrom(a, b, shift)
+  return { kind, x: r.x, y: r.y, w: r.w, h: r.h, fill: o.shapeFill, fillColor: fg, stroke: o.shapeStroke || !o.shapeFill, strokeColor: o.shapeFill ? bg : fg, strokeWidth: o.strokeWidth, sides: o.sides, custom: o.customShape, radius: o.radius }
+}
 function drawShape(tool: ToolId, x: CanvasRenderingContext2D, a: P, b: P, shift: boolean) {
   const o = ts.opts
   if (tool === 'shape-line') {
@@ -509,11 +547,11 @@ function drawShape(tool: ToolId, x: CanvasRenderingContext2D, a: P, b: P, shift:
   x.save()
   x.translate(r.x + r.w / 2, r.y + r.h / 2)
   x.beginPath()
-  if (tool === 'shape-rect') x.rect(-r.w / 2, -r.h / 2, r.w, r.h)
+  if (tool === 'shape-rect') { if (o.radius > 0) x.roundRect(-r.w / 2, -r.h / 2, r.w, r.h, Math.min(o.radius, r.w / 2, r.h / 2)); else x.rect(-r.w / 2, -r.h / 2, r.w, r.h) }
   else if (tool === 'shape-ellipse') x.ellipse(0, 0, r.w / 2, r.h / 2, 0, 0, Math.PI * 2)
   else if (tool === 'shape-triangle') shapePath(x, 'triangle', r.w, r.h)
   else if (tool === 'shape-polygon') shapePath(x, 'polygon', r.w, r.h, o.sides)
-  else if (tool === 'shape-custom') customShapePath(x, o.customShape, r.w, r.h)
+  else if (tool === 'shape-custom') liveCustomShape(x, o.customShape, r.w, r.h)
   if (o.shapeFill) { x.fillStyle = usePhoto.getState().fg; x.fill() }
   if (o.shapeStroke || !o.shapeFill) { x.lineWidth = Math.max(1, o.strokeWidth); x.lineJoin = 'round'; x.strokeStyle = o.shapeFill ? usePhoto.getState().bg : usePhoto.getState().fg; x.stroke() }
   x.restore()
@@ -573,39 +611,66 @@ function hitSegment(p: P, tol: number) {
 export function pathMask(p: VPath): Mask { return shapeMask((x) => x.fill(pathToPath2D(p))) }
 
 /* ---- text ---- */
+export function currentTextProps(t: { x: number; y: number; vertical: boolean }, text: string): TextProps {
+  const o = ts.opts
+  return { text, x: t.x, y: t.y, font: o.fontFamily, size: o.fontSize, color: usePhoto.getState().fg, bold: o.bold, italic: o.italic, vertical: t.vertical, align: o.align, lineHeight: o.lineHeight, letterSpacing: o.letterSpacing }
+}
 export function commitText(text: string) {
   const t = ts.typing
   ts.typing = null
-  if (!t || !text.trim()) { bump(); return }
-  const o = ts.opts
-  const font = `${o.italic ? 'italic ' : ''}${o.bold ? 'bold ' : ''}${o.fontSize}px ${o.fontFamily}`
-  const drawText = (x: CanvasRenderingContext2D) => {
-    x.font = font; x.textBaseline = 'top'; x.fillStyle = usePhoto.getState().fg
-    const lines = text.split('\n')
-    if (t.vertical) {
-      lines.forEach((line, col) => [...line].forEach((ch, row) => {
-        const w = x.measureText(ch).width
-        x.fillText(ch, t.x + col * o.fontSize * 1.2 + (o.fontSize - w) / 2, t.y + row * o.fontSize * 1.1)
-      }))
-    } else lines.forEach((line, i) => x.fillText(line, t.x, t.y + i * o.fontSize * 1.2))
+  if (!t) { bump(); return }
+  if (t.layerId) {
+    const l = doc.layers.find((x) => x.id === t.layerId)
+    if (l?.text) {
+      if (!text.trim()) { doc.layers.splice(doc.layers.indexOf(l), 1); doc.active = Math.max(0, Math.min(doc.active, doc.layers.length - 1)); doc.commit('Delete text'); return }
+      l.text.text = text; l.name = text.split('\n')[0].slice(0, 24); l.visible = true
+      renderLive(l); doc.commit('Edit text', [l.id]); return
+    }
   }
+  if (!text.trim()) { bump(); return }
+  const props = currentTextProps(t, text)
   if (t.mask) {
-    const m = shapeMask(drawText)
-    applySelection(m, ts.opts.selMode, 'Type mask')
+    applySelection(shapeMask((x) => drawTextProps(x, { ...props, color: '#000' })), ts.opts.selMode, 'Type mask')
     return
   }
-  const l = doc.addLayer('T ' + text.split('\n')[0].slice(0, 24))
-  drawText(ctx2d(l.canvas))
+  const l = doc.addLayer(text.split('\n')[0].slice(0, 24))
+  l.kind = 'text'; l.text = props
+  renderLive(l)
   doc.commit('Type')
+}
+/** Find an editable text layer under a point (top-most first). */
+export function textLayerAt(p: P): Layer | null {
+  const c = makeCanvas(1, 1), x = ctx2d(c)
+  for (let i = doc.layers.length - 1; i >= 0; i--) {
+    const l = doc.layers[i]
+    if (l.kind !== 'text' || !l.text || !l.visible) continue
+    const b = textBounds(l.text, x)
+    if (p.x >= b.x - 6 && p.x <= b.x + b.w + 6 && p.y >= b.y - 6 && p.y <= b.y + b.h + 6) return l
+  }
+  return null
+}
+export function liveBounds(l: Layer) {
+  if (l.kind === 'text' && l.text) return textBounds(l.text, ctx2d(makeCanvas(1, 1)))
+  if (l.kind === 'shape' && l.shape) return shapeBounds(l.shape)
+  return null
 }
 
 /* ======================= main dispatch ======================= */
 export function onDown(p: P, e: PointerEvent, zoom: number) {
+  if (ts.xform) { xformDown(p, zoom); return }
+  ts.pressure = e.pointerType === 'pen' && e.pressure > 0 ? e.pressure : 1
   const tool = ts.tool
   const o = ts.opts
   ts.start = p; ts.last = p
   const tol = 8 / zoom
   const l = doc.layer
+  const paintsPixels = (BRUSH_TOOLS.includes(tool) && !['quick-select', 'selection-brush'].includes(tool) && !usePhoto.getState().quickMask) || ['gradient', 'bucket', 'magic-eraser', 'red-eye'].includes(tool)
+  if (paintsPixels && !doc.maskEdit) {
+    if (l.kind === 'adjust') {
+      if (l.mask) { doc.maskEdit = true; notify('Painting on the adjustment layer\'s mask (black hides the effect)') }
+      else { notify('Adjustment layers have no pixels. Add a mask to paint where the effect applies.'); return }
+    } else if (rasterize(l)) notify(`"${l.name}" converted to pixels so you can paint on it`)
+  }
   if (BRUSH_TOOLS.includes(tool) && tool !== 'quick-select' && l.locked && !usePhoto.getState().quickMask && tool !== 'selection-brush') { notify('Layer is locked'); return }
 
   switch (tool) {
@@ -732,7 +797,16 @@ export function onDown(p: P, e: PointerEvent, zoom: number) {
       bump(); return
     }
     case 'type-h': case 'type-v': case 'type-mask-h': case 'type-mask-v':
-      ts.typing = { x: p.x, y: p.y, vertical: tool.endsWith('-v'), mask: tool.includes('mask') }
+      {
+        const hit = tool.includes('mask') ? null : textLayerAt(p)
+        if (hit?.text) {
+          doc.active = doc.layers.indexOf(hit)
+          Object.assign(ts.opts, { fontFamily: hit.text.font, fontSize: hit.text.size, bold: hit.text.bold, italic: hit.text.italic, align: hit.text.align, lineHeight: hit.text.lineHeight, letterSpacing: hit.text.letterSpacing })
+          usePhoto.setState({ fg: hit.text.color })
+          ts.typing = { x: hit.text.x, y: hit.text.y, vertical: hit.text.vertical, mask: false, layerId: hit.id, initial: hit.text.text }
+          hit.visible = false
+        } else ts.typing = { x: p.x, y: p.y, vertical: tool.endsWith('-v'), mask: tool.includes('mask') }
+      }
       bump(); return
     case 'crop-perspective': {
       const i = ts.quad.findIndex((q) => Math.hypot(q.x - p.x, q.y - p.y) < tol * 1.5)
@@ -757,6 +831,12 @@ export function onDown(p: P, e: PointerEvent, zoom: number) {
     }
     case 'move': {
       if (l.locked) return notify('Layer is locked')
+      if ((l.kind === 'text' || l.kind === 'shape') && !doc.selection) {
+        const pr = l.text ?? l.shape!
+        ts.liveMove = { x: pr.x, y: pr.y }
+        return
+      }
+      if (l.kind === 'adjust') return notify('Adjustment layers have no pixels to move')
       const base = makeCanvas(doc.width, doc.height), bx = ctx2d(base)
       bx.drawImage(l.canvas, 0, 0)
       const fl = makeCanvas(doc.width, doc.height), fx = ctx2d(fl)
@@ -813,8 +893,11 @@ function snapEdge(p: P): P {
   return best
 }
 
+const l2 = () => doc.layer
 export function onMove(p: P, e: PointerEvent, zoom: number) {
   ts.cursor = p
+  if (e.pointerType === 'pen' && e.pressure > 0) ts.pressure = e.pressure
+  if (ts.xform) { if (ts.xform.drag) xformMove(p, e); return }
   const tool = ts.tool
   if (tool === 'lasso-magnetic' && ts.points.length) {
     const last = ts.points[ts.points.length - 1]
@@ -836,6 +919,11 @@ export function onMove(p: P, e: PointerEvent, zoom: number) {
     case 'patch': case 'content-move':
       ts.points.push(p); bump(); return
     case 'move':
+      if (ts.liveMove) {
+        const pr = l2().text ?? l2().shape
+        if (pr) { pr.x = Math.round(ts.liveMove.x + p.x - a.x); pr.y = Math.round(ts.liveMove.y + p.y - a.y); renderLive(l2()); bump() }
+        return
+      }
       if (ts.floating) {
         const f = ts.floating
         f.dx = Math.round(p.x - a.x); f.dy = Math.round(p.y - a.y)
@@ -879,6 +967,7 @@ export function onMove(p: P, e: PointerEvent, zoom: number) {
 }
 
 export async function onUp(p: P, e: PointerEvent) {
+  if (ts.xform) { xformUp(); ts.start = null; return }
   const tool = ts.tool
   const a = ts.start
   ts.start = null
@@ -931,7 +1020,8 @@ export async function onUp(p: P, e: PointerEvent) {
       if (Math.hypot(p.x - a.x, p.y - a.y) < 3) return
       const names: Record<string, string> = { 'shape-rect': 'Rectangle', 'shape-ellipse': 'Ellipse', 'shape-triangle': 'Triangle', 'shape-polygon': 'Polygon', 'shape-line': 'Line', 'shape-custom': ts.opts.customShape }
       const nl = doc.addLayer(names[tool] + ' ' + doc.layers.length)
-      drawShape(tool, ctx2d(nl.canvas), a, p, e.shiftKey)
+      nl.kind = 'shape'; nl.shape = shapePropsFrom(tool, a, p, e.shiftKey)
+      renderLive(nl)
       doc.commit(names[tool]); return
     }
     case 'pen-free': {
@@ -945,6 +1035,7 @@ export async function onUp(p: P, e: PointerEvent) {
     }
     case 'pen': case 'anchor-convert': case 'direct-select': case 'path-select': ts.pathDrag = null; bump(true); return
     case 'move': {
+      if (ts.liveMove) { ts.liveMove = null; doc.commit('Move', [l.id]); return }
       const f = ts.floating
       ts.floating = null
       if (!f) return
@@ -1082,6 +1173,7 @@ export function drawFramePlaceholder(c: HTMLCanvasElement, f: NonNullable<import
 
 /** Enter key / ✓ button: commit pending operations. */
 export function applyPending() {
+  if (applyTransform()) return true
   const tool = ts.tool
   if ((tool === 'crop' || tool === 'artboard') && ts.crop) {
     const c = ts.crop
@@ -1129,6 +1221,13 @@ export function straightenFromRuler() {
 /* ======================= overlay drawing ======================= */
 export function drawOverlay(x: CanvasRenderingContext2D, zoom: number, phase: number) {
   const px = 1 / zoom
+  drawXform(x, zoom)
+  // live layer bounds for move/type tools
+  const al = doc.layer
+  if (al && (al.kind === 'text' || al.kind === 'shape') && ['move', 'type-h', 'type-v'].includes(ts.tool) && !ts.typing) {
+    const b = liveBounds(al)
+    if (b) { x.strokeStyle = '#8b5cf6'; x.setLineDash([4 * px, 3 * px]); x.lineWidth = px; x.strokeRect(b.x, b.y, b.w, b.h); x.setLineDash([]) }
+  }
   x.lineWidth = px
   // slices
   doc.slices.forEach((s, i) => {
@@ -1245,3 +1344,109 @@ export function drawOverlay(x: CanvasRenderingContext2D, zoom: number, phase: nu
   }
 }
 
+
+/* ======================= Free Transform ======================= */
+function contentBounds(c: HTMLCanvasElement) {
+  const d = ctx2d(c).getImageData(0, 0, c.width, c.height).data
+  let x0 = c.width, y0 = c.height, x1 = -1, y1 = -1
+  for (let y = 0; y < c.height; y++) for (let x = 0; x < c.width; x++) if (d[(y * c.width + x) * 4 + 3] > 0) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y }
+  return x1 < 0 ? null : { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 }
+}
+export function startTransform() {
+  const l = doc.layer
+  if (l.locked) return notify('Layer is locked')
+  if (l.kind === 'adjust') return notify('Adjustment layers cannot be transformed')
+  if (rasterize(l)) notify(`"${l.name}" converted to pixels for transforming`)
+  const b = contentBounds(l.canvas)
+  if (!b) return notify('This layer is empty')
+  const copy = (c: HTMLCanvasElement) => { const n = makeCanvas(c.width, c.height); ctx2d(n).drawImage(c, 0, 0); return n }
+  ts.xform = { layerId: l.id, src: copy(l.canvas), maskSrc: l.mask ? copy(l.mask) : null, b, tx: 0, ty: 0, sx: 1, sy: 1, rot: 0, drag: null }
+  bump()
+}
+function xformCenter(x: XForm) { return { x: x.b.x + x.b.w / 2 + x.tx, y: x.b.y + x.b.h / 2 + x.ty } }
+function xformRender(x: XForm) {
+  const l = doc.layers.find((q) => q.id === x.layerId)
+  if (!l) return
+  const c0 = { x: x.b.x + x.b.w / 2, y: x.b.y + x.b.h / 2 }
+  const draw = (dst: HTMLCanvasElement, src: HTMLCanvasElement, bg?: string) => {
+    const g = ctx2d(dst)
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, dst.width, dst.height)
+    if (bg) { g.fillStyle = bg; g.fillRect(0, 0, dst.width, dst.height) }
+    g.translate(c0.x + x.tx, c0.y + x.ty); g.rotate((x.rot * Math.PI) / 180); g.scale(x.sx, x.sy); g.translate(-c0.x, -c0.y)
+    g.imageSmoothingQuality = 'high'
+    g.drawImage(src, 0, 0); g.restore()
+  }
+  draw(l.canvas, x.src)
+  if (l.mask && x.maskSrc) draw(l.mask, x.maskSrc, '#000')
+  bump()
+}
+export function applyTransform() {
+  const x = ts.xform
+  if (!x) return false
+  ts.xform = null
+  doc.commit('Free Transform', [x.layerId])
+  return true
+}
+export function cancelTransform() {
+  const x = ts.xform
+  if (!x) return
+  ts.xform = null
+  const l = doc.layers.find((q) => q.id === x.layerId)
+  if (l) { ctx2d(l.canvas).clearRect(0, 0, l.canvas.width, l.canvas.height); ctx2d(l.canvas).drawImage(x.src, 0, 0); if (l.mask && x.maskSrc) ctx2d(l.mask).drawImage(x.maskSrc, 0, 0) }
+  bump()
+}
+function toLocal(x: XForm, p: P) {
+  const c = xformCenter(x), a = (-x.rot * Math.PI) / 180
+  const dx = p.x - c.x, dy = p.y - c.y
+  return { u: dx * Math.cos(a) - dy * Math.sin(a), v: dx * Math.sin(a) + dy * Math.cos(a) }
+}
+export function xformDown(p: P, zoom: number) {
+  const x = ts.xform!
+  const { u, v } = toLocal(x, p)
+  const hw = (x.b.w * Math.abs(x.sx)) / 2, hh = (x.b.h * Math.abs(x.sy)) / 2
+  const tol = 10 / zoom
+  const o = { tx: x.tx, ty: x.ty, sx: x.sx, sy: x.sy, rot: x.rot }
+  for (const hx of [-1, 0, 1]) for (const hy of [-1, 0, 1]) {
+    if (!hx && !hy) continue
+    if (Math.abs(u - hx * hw) < tol && Math.abs(v - hy * hh) < tol) { x.drag = { mode: 'scale', hx, hy, p0: p, o }; return }
+  }
+  if (Math.abs(u) <= hw && Math.abs(v) <= hh) { x.drag = { mode: 'move', hx: 0, hy: 0, p0: p, o }; return }
+  x.drag = { mode: 'rotate', hx: 0, hy: 0, p0: p, o }
+}
+export function xformMove(p: P, e: PointerEvent) {
+  const x = ts.xform!
+  const d = x.drag
+  if (!d) return
+  if (d.mode === 'move') { x.tx = d.o.tx + p.x - d.p0.x; x.ty = d.o.ty + p.y - d.p0.y }
+  else if (d.mode === 'rotate') {
+    const c = xformCenter(x)
+    let r = d.o.rot + ((Math.atan2(p.y - c.y, p.x - c.x) - Math.atan2(d.p0.y - c.y, d.p0.x - c.x)) * 180) / Math.PI
+    if (e.shiftKey) r = Math.round(r / 15) * 15
+    x.rot = r
+  } else {
+    const { u, v } = toLocal(x, p)
+    let sx = d.hx ? (Math.abs(u) * 2) / x.b.w * Math.sign(u * d.hx || 1) * Math.sign(d.o.sx) : d.o.sx
+    let sy = d.hy ? (Math.abs(v) * 2) / x.b.h * Math.sign(v * d.hy || 1) * Math.sign(d.o.sy) : d.o.sy
+    if (d.hx && d.hy && !e.shiftKey) { const k = Math.max(Math.abs(sx / d.o.sx), Math.abs(sy / d.o.sy)); sx = d.o.sx * k; sy = d.o.sy * k }
+    x.sx = Math.abs(sx) < 0.01 ? 0.01 : sx; x.sy = Math.abs(sy) < 0.01 ? 0.01 : sy
+  }
+  xformRender(x)
+}
+export function xformUp() { if (ts.xform) ts.xform.drag = null }
+export function setXform(v: Partial<Pick<XForm, 'tx' | 'ty' | 'sx' | 'sy' | 'rot'>>) { if (ts.xform) { Object.assign(ts.xform, v); xformRender(ts.xform) } }
+export function drawXform(g: CanvasRenderingContext2D, zoom: number) {
+  const x = ts.xform
+  if (!x) return
+  const c = xformCenter(x), px = 1 / zoom
+  const hw = (x.b.w * Math.abs(x.sx)) / 2, hh = (x.b.h * Math.abs(x.sy)) / 2
+  g.save(); g.translate(c.x, c.y); g.rotate((x.rot * Math.PI) / 180)
+  g.strokeStyle = '#8b5cf6'; g.lineWidth = 1.5 * px; g.strokeRect(-hw, -hh, hw * 2, hh * 2)
+  g.fillStyle = '#fff'
+  for (const hx of [-1, 0, 1]) for (const hy of [-1, 0, 1]) {
+    if (!hx && !hy) { g.beginPath(); g.arc(0, 0, 3 * px, 0, 7); g.stroke(); continue }
+    g.fillRect(hx * hw - 4 * px, hy * hh - 4 * px, 8 * px, 8 * px); g.strokeRect(hx * hw - 4 * px, hy * hh - 4 * px, 8 * px, 8 * px)
+  }
+  g.restore()
+  g.fillStyle = '#fff'; g.font = `${12 * px}px sans-serif`
+  g.fillText(`${Math.round(Math.abs(x.sx) * 100)}% × ${Math.round(Math.abs(x.sy) * 100)}%  ${Math.round(x.rot)}°  · Enter apply, Esc cancel`, c.x - hw, c.y - hh - 10 * px)
+}

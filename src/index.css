@@ -220,3 +220,6 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .panel { overflow-x: hidden; }
 .grid2 > button, .grid3 > button { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .video-editor { grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(240px, 300px); grid-template-rows: minmax(0, 1fr) clamp(200px, 38vh, 300px); }
+.photo-right { width: 290px; }
+.photo-right .panel-title { flex-wrap: wrap; row-gap: 2px; }
+.photo-right .panel-title button.icon { padding: 2px 5px; font-size: 12px; }

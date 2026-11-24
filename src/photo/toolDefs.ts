@@ -173,6 +173,15 @@ export interface ToolOptions {
   sampleSize: 1 | 3 | 5
   frameShape: 'rect' | 'ellipse'
   cropDelete: boolean
+  tip: 'round' | 'square' | 'flat' | 'chalk' | 'spray'
+  spacing: number
+  scatter: number
+  angle: number
+  pressure: boolean
+  radius: number
+  lineHeight: number
+  letterSpacing: number
+  align: 'left' | 'center' | 'right'
 }
 
 export const DEFAULT_OPTIONS: ToolOptions = {
@@ -181,7 +190,22 @@ export const DEFAULT_OPTIONS: ToolOptions = {
   fontSize: 72, fontFamily: 'Inter, system-ui, sans-serif', bold: false, italic: false, range: 'midtones', exposure: 0.5,
   spongeMode: 'desaturate', strength: 0.5, pattern: 'checker', adjBrightness: 0.3, adjSaturation: 0, adjWarmth: 0, wet: 0.5, aligned: true,
   sampleSize: 1, frameShape: 'rect', cropDelete: true,
+  tip: 'round', spacing: 0.2, scatter: 0, angle: 45, pressure: true, radius: 0, lineHeight: 1.2, letterSpacing: 0, align: 'left',
 }
 
 export const BRUSH_TOOLS: ToolId[] = ['brush', 'pencil', 'color-replace', 'mixer-brush', 'adjust-brush', 'clone-stamp', 'pattern-stamp', 'history-brush', 'art-history',
   'eraser', 'bg-eraser', 'blur', 'sharpen', 'smudge', 'dodge', 'burn', 'sponge', 'remove', 'spot-heal', 'heal', 'selection-brush', 'quick-select']
+
+export interface BrushPreset { name: string; size: number; hardness: number; flow: number; opacity: number; tip: ToolOptions['tip']; spacing: number; scatter: number; angle?: number }
+export const BRUSH_PRESETS: BrushPreset[] = [
+  { name: 'Soft round', size: 40, hardness: 0, flow: 1, opacity: 1, tip: 'round', spacing: 0.15, scatter: 0 },
+  { name: 'Hard round', size: 20, hardness: 0.95, flow: 1, opacity: 1, tip: 'round', spacing: 0.12, scatter: 0 },
+  { name: 'Airbrush', size: 80, hardness: 0, flow: 0.08, opacity: 1, tip: 'round', spacing: 0.08, scatter: 0 },
+  { name: 'Ink pen', size: 6, hardness: 0.9, flow: 1, opacity: 1, tip: 'round', spacing: 0.08, scatter: 0 },
+  { name: 'Marker', size: 24, hardness: 0.85, flow: 1, opacity: 0.7, tip: 'square', spacing: 0.1, scatter: 0 },
+  { name: 'Calligraphy', size: 30, hardness: 0.9, flow: 1, opacity: 1, tip: 'flat', spacing: 0.05, scatter: 0, angle: 45 },
+  { name: 'Chalk', size: 36, hardness: 0.7, flow: 0.8, opacity: 1, tip: 'chalk', spacing: 0.2, scatter: 0.1 },
+  { name: 'Spray paint', size: 70, hardness: 0.3, flow: 1, opacity: 1, tip: 'spray', spacing: 0.15, scatter: 0 },
+  { name: 'Pencil sketch', size: 4, hardness: 0.6, flow: 0.6, opacity: 0.8, tip: 'chalk', spacing: 0.1, scatter: 0 },
+  { name: 'Leaves scatter', size: 26, hardness: 0.8, flow: 1, opacity: 1, tip: 'round', spacing: 0.9, scatter: 1.2 },
+]
