@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { useStore, projectDuration, clipEnd } from '../core/store'
 import { getVideo, peekVideo, seekVideo, getAudioContext } from '../core/media'
-import { renderFrame, videoClipTime } from './render'
+import { renderFrame, videoClipTime, instantSpeed } from './render'
 import { startPlayback, stopPlayback } from '../audio/engine'
 import type { Project } from '../core/types'
 
@@ -74,9 +74,16 @@ export function usePreview(canvasRef: React.RefObject<HTMLCanvasElement | null>)
           const active = t >= c.start && t < clipEnd(c)
           if (active) {
             const target = videoClipTime(c, t)
-            if (v.playbackRate !== c.speed) v.playbackRate = Math.min(16, Math.max(0.0625, c.speed))
-            if (v.paused) { v.currentTime = target; void v.play().catch(() => {}) }
-            else if (Math.abs(v.currentTime - target) > 0.3) v.currentTime = target
+            if (c.reverse) {
+              // browsers can't play backwards: step by seeking
+              if (!v.paused) v.pause()
+              if (!v.seeking && Math.abs(v.currentTime - target) > 1 / 40) v.currentTime = target
+            } else {
+              const rate = Math.min(16, Math.max(0.0625, c.speedCurve && c.speedCurve !== 'none' ? instantSpeed(c, t - c.start) : c.speed))
+              if (Math.abs(v.playbackRate - rate) > 0.02) v.playbackRate = rate
+              if (v.paused) { v.currentTime = target; void v.play().catch(() => {}) }
+              else if (Math.abs(v.currentTime - target) > 0.3) v.currentTime = target
+            }
           } else if (!v.paused) v.pause()
           else if (t < c.start && c.start - t < 1 && Math.abs(v.currentTime - c.inPoint) > 0.05) v.currentTime = c.inPoint
         }

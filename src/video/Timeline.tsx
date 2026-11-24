@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import { useStore, clipEnd, projectDuration, newTrack } from '../core/store'
 import type { Clip, Project, Track } from '../core/types'
-import { getPeaks, getAudioBuffer, peekVideo } from '../core/media'
+import { getPeaks, getAudioBuffer, peekVideo, getVideo, seekVideo, importFile } from '../core/media'
+import { detectBeats } from '../audio/beats'
+import { videoClipTime } from './render'
 import { fmtTime } from '../ui/controls'
 import { nanoid } from 'nanoid'
 
@@ -102,6 +104,7 @@ export function Timeline() {
     if (!snap) return t
     const pts = [0, useStore.getState().playhead]
     for (const c of useStore.getState().project.clips) if (!ignore.includes(c.id)) pts.push(c.start, clipEnd(c))
+    pts.push(...(useStore.getState().project.markers ?? []))
     const thr = 8 / pps
     for (const p of pts) if (Math.abs(p - t) < thr) return p
     return t
@@ -192,6 +195,52 @@ export function Timeline() {
     }
     setTimeout(() => select(newIds))
   })
+  const sel0 = project.clips.find((c) => c.id === selected[0])
+  const addMarker = () => update((p) => { const t = useStore.getState().playhead; p.markers = [...(p.markers ?? []).filter((m) => Math.abs(m - t) > 0.02), t].sort((a, b) => a - b) })
+  const detect = async () => {
+    const c = sel0
+    if (!c || !c.mediaId || (c.kind !== 'audio' && c.kind !== 'video')) return useStore.getState().notify('Select a music or video clip first')
+    useStore.getState().notify('Finding beats…')
+    const buf = await getAudioBuffer(c.mediaId)
+    if (!buf) return useStore.getState().notify('That clip has no audio')
+    const src = detectBeats(buf, c.inPoint, c.inPoint + c.duration * c.speed)
+    const times = src.map((t) => c.start + (t - c.inPoint) / c.speed)
+    update((p) => { p.markers = Array.from(new Set([...(p.markers ?? []), ...times].map((t) => Math.round(t * 1000) / 1000))).sort((a, b) => a - b) })
+    useStore.getState().notify(`Added ${times.length} beat markers`)
+  }
+  const cutToBeats = () => {
+    const ms = project.markers ?? []
+    if (!ms.length) return useStore.getState().notify('Add markers first (M key, or Detect beats)')
+    if (!selected.length) return useStore.getState().notify('Select the clip(s) to cut')
+    let n = 0
+    update((p) => { for (const m of ms) n += splitAt(p, p.clips.filter((c) => selected.includes(c.id) || c.trackId === p.clips.find((x) => x.id === selected[0])?.trackId).map((c) => c.id), m) })
+    useStore.getState().notify(`Cut into ${n} more pieces on the beats`)
+  }
+  const freezeFrame = async () => {
+    const st = useStore.getState()
+    const t = st.playhead
+    const c = st.project.clips.find((x) => x.kind === 'video' && (selected.includes(x.id) || !selected.length) && t >= x.start && t < clipEnd(x))
+    if (!c) return st.notify('Put the playhead over a video clip to freeze a frame')
+    const v = await getVideo(c.id, c.mediaId!)
+    if (!v) return
+    await seekVideo(v, videoClipTime(c, t))
+    const cv = document.createElement('canvas'); cv.width = v.videoWidth; cv.height = v.videoHeight
+    cv.getContext('2d')!.drawImage(v, 0, 0)
+    const blob = await new Promise<Blob | null>((r) => cv.toBlob(r, 'image/png'))
+    if (!blob) return
+    const m = await importFile(new File([blob], `Freeze ${t.toFixed(2)}s.png`, { type: 'image/png' }))
+    if (!m) return
+    st.addMedia(m)
+    const FREEZE = 2
+    update((p) => {
+      splitAt(p, [c.id], t)
+      for (const o of p.clips) if (o.trackId === c.trackId && o.start >= t - 0.001) o.start += FREEZE
+      const img: Clip = JSON.parse(JSON.stringify(p.clips.find((x) => x.id === c.id)))
+      Object.assign(img, { id: nanoid(8), kind: 'image', mediaId: m.id, name: 'Freeze frame', start: t, duration: FREEZE, inPoint: 0, speed: 1, reverse: false, speedCurve: 'none', transitionIn: { type: 'none', duration: 0.5 }, animIn: 'none', animOut: 'none', keyframes: {} })
+      p.clips.push(img)
+    })
+    st.notify('Freeze frame added (2s)')
+  }
   const extractAudio = () => update((p) => {
     for (const c of p.clips.filter((x) => selected.includes(x.id) && x.kind === 'video')) {
       let tr = p.tracks.find((t) => t.kind === 'audio' && !p.clips.some((o) => o.trackId === t.id && o.start < clipEnd(c) && clipEnd(o) > c.start))
@@ -215,6 +264,8 @@ export function Timeline() {
       else if ((e.ctrlKey || e.metaKey) && k === 'd') { e.preventDefault(); doDuplicate() }
       else if ((e.ctrlKey || e.metaKey) && k === 'b') { e.preventDefault(); doSplit() }
       else if (k === 's' && !e.ctrlKey) doSplit()
+      else if (k === 'm' && !e.ctrlKey) addMarker()
+      else if (k === 'f' && !e.ctrlKey) void freezeFrame()
       else if (k === 'delete' || k === 'backspace') doDelete(e.shiftKey)
       else if (k === 'arrowleft') st.setPlayhead(st.playhead - (e.shiftKey ? 1 : 1 / st.project.fps))
       else if (k === 'arrowright') st.setPlayhead(st.playhead + (e.shiftKey ? 1 : 1 / st.project.fps))
@@ -255,6 +306,12 @@ export function Timeline() {
         <button disabled={!selected.length} onClick={() => doDelete(true)}>Ripple delete</button>
         <button title="Duplicate (Ctrl+D)" disabled={!selected.length} onClick={doDuplicate}>⧉ Duplicate</button>
         <button disabled={!selected.some((id) => project.clips.find((c) => c.id === id)?.kind === 'video')} onClick={extractAudio}>🎵 Extract audio</button>
+        <button title="Freeze the frame at the playhead for 2 seconds (F)" onClick={() => void freezeFrame()}>❄ Freeze</button>
+        <button title="Reverse the selected clip(s)" disabled={!selected.length} onClick={() => update((p) => p.clips.filter((c) => selected.includes(c.id)).forEach((c) => { c.reverse = !c.reverse }))}>⇆ Reverse</button>
+        <button title="Add a marker at the playhead (M)" onClick={addMarker}>📍 Marker</button>
+        <button title="Detect beats in the selected music/video clip" onClick={() => void detect()}>♪ Beats</button>
+        <button title="Split the selected clip's track at every marker" onClick={cutToBeats}>✂ Cut to beats</button>
+        {(project.markers?.length ?? 0) > 0 && <button title="Remove all markers" onClick={() => update((p) => { p.markers = [] })}>Clear markers</button>}
         <span className="spacer" style={{ flex: 1 }} />
         <button onClick={() => update((p) => { p.tracks.splice(p.tracks.findIndex((t) => t.kind === 'video'), 0, newTrack('video', p.tracks.filter((t) => t.kind === 'video').length + 1)) })}>+ Video track</button>
         <button onClick={() => update((p) => { p.tracks.unshift(newTrack('text', p.tracks.filter((t) => t.kind === 'text').length + 1)) })}>+ Text track</button>
@@ -284,6 +341,13 @@ export function Timeline() {
         }} onPointerDown={(e) => { if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('tl-track')) select([]) }}>
           <div style={{ width: dur * pps, position: 'relative', minHeight: '100%' }}>
             <div className="tl-ruler" onPointerDown={onRulerDown}>
+              {(project.markers ?? []).map((m, i) => (
+                <div key={'m' + i} title={`Marker ${fmtTime(m)}. Right-click to remove`} onContextMenu={(e) => { e.preventDefault(); update((p) => { p.markers = (p.markers ?? []).filter((x) => x !== m) }) }}
+                  style={{ position: 'absolute', left: m * pps - 4, top: 0, width: 8, height: 22, zIndex: 2, cursor: 'pointer' }}>
+                  <div style={{ position: 'absolute', left: 3, top: 8, width: 2, height: 14, background: '#c084fc' }} />
+                  <div style={{ position: 'absolute', left: 0, top: 2, width: 8, height: 8, background: '#c084fc', transform: 'rotate(45deg)' }} />
+                </div>
+              ))}
               {ticks.map((t) => (
                 <div key={t} style={{ position: 'absolute', left: t * pps, top: 0, bottom: 0, borderLeft: '1px solid #444', paddingLeft: 3, fontSize: 10, color: '#888' }}>{fmtTime(t).slice(0, -3)}</div>
               ))}

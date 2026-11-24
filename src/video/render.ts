@@ -3,6 +3,7 @@ import { identityMotion, loopMotion, presetMotion, sampleKeys, type Motion } fro
 import { peekImage, peekVideo, getImage } from '../core/media'
 import { animationCanvas } from '../animator/render'
 import { clipEnd } from '../core/store'
+import { personMask } from '../core/segment'
 
 export const FILTER_PRESETS: Record<string, Partial<Filters>> = {
   none: {},
@@ -83,6 +84,8 @@ function clipMotion(c: Clip, local: number, W: number, H: number): Motion {
 }
 
 let tmp: HTMLCanvasElement | null = null
+let bgTmp: HTMLCanvasElement | null = null
+const bgOwners = new Map<string, object>()
 function tmpCanvas(w: number, h: number) {
   if (!tmp) tmp = document.createElement('canvas')
   if (tmp.width !== w || tmp.height !== h) { tmp.width = w; tmp.height = h }
@@ -201,6 +204,22 @@ export function drawClip(ctx: CanvasRenderingContext2D, p: Project, c: Clip, t: 
         const r = c.fit === 'contain' ? Math.min(W / w, H / h) : Math.max(W / w, H / h)
         dw = w * r; dh = h * r
       }
+      if (c.removeBg) {
+        const key = c.kind === 'video' ? Math.round(((src as HTMLVideoElement).currentTime || 0) * 1000) : 0
+        let owner = bgOwners.get(c.id)
+        if (!owner) { owner = {}; bgOwners.set(c.id, owner) }
+        const mw = Math.min(w, 1280), mh = Math.round((h * mw) / w)
+        const m = personMask(src, mw, mh, key, owner, c.removeBgSoftness ?? 0.5)
+        if (m) {
+          if (!bgTmp) bgTmp = document.createElement('canvas')
+          bgTmp.width = mw; bgTmp.height = mh
+          const bx = bgTmp.getContext('2d')!
+          bx.globalCompositeOperation = 'source-over'; bx.clearRect(0, 0, mw, mh); bx.drawImage(src, 0, 0, mw, mh)
+          bx.globalCompositeOperation = 'destination-in'; bx.drawImage(m, 0, 0)
+          bx.globalCompositeOperation = 'source-over'
+          src = bgTmp
+        }
+      }
       if (c.chromaKey?.enabled) {
         const sw = Math.min(w, 960), sh = Math.round((h * sw) / w)
         src = chromaKey(src, sw, sh, c.chromaKey.color, c.chromaKey.tolerance)
@@ -260,7 +279,69 @@ export function renderFrame(ctx: CanvasRenderingContext2D, p: Project, t: number
   }
 }
 
-/** Seek all needed video elements for time t (export path). */
+/* ---------- speed curves ---------- */
+export const SPEED_CURVES: Record<string, number[]> = {
+  none: [1, 1],
+  montage: [0.6, 0.6, 3, 3, 0.6, 0.6, 3, 3],
+  hero: [1.5, 1.5, 4, 0.25, 0.25, 4, 1.5, 1.5],
+  bullet: [2.5, 2.5, 0.2, 0.2, 0.2, 0.2, 2.5, 2.5],
+  'jump cut': [1, 1, 1, 6, 6, 1, 1, 1],
+  'flash in': [5, 3.5, 2, 1, 1, 1, 1, 1],
+  'flash out': [1, 1, 1, 1, 1, 2, 3.5, 5],
+  'ramp up': [0.4, 0.7, 1, 1.5, 2, 3, 4, 5],
+  'slow-mo middle': [2, 2, 0.3, 0.3, 0.3, 0.3, 2, 2],
+}
+const curveCache = new Map<string, Float64Array>()
+/** Cumulative integral of a speed curve sampled at 256 steps, normalised to end at 1. */
+function curveIntegral(name: string) {
+  let F = curveCache.get(name)
+  if (F) return F
+  const pts = SPEED_CURVES[name] ?? [1, 1]
+  const N = 256
+  F = new Float64Array(N + 1)
+  const f = (u: number) => { const x = u * (pts.length - 1), i = Math.min(pts.length - 2, Math.floor(x)); const t = x - i; const k = (1 - Math.cos(t * Math.PI)) / 2; return pts[i] + (pts[i + 1] - pts[i]) * k }
+  for (let i = 1; i <= N; i++) F[i] = F[i - 1] + f((i - 0.5) / N) / N
+  const tot = F[N]
+  for (let i = 0; i <= N; i++) F[i] /= tot
+  curveCache.set(name, F)
+  return F
+}
+/** Source-time offset (from inPoint) for a clip at local timeline time. */
+export function sourceOffset(c: Clip, local: number) {
+  const srcLen = c.duration * c.speed
+  const u = Math.min(1, Math.max(0, local / Math.max(1e-6, c.duration)))
+  let off = srcLen * u
+  if (c.speedCurve && c.speedCurve !== 'none') {
+    const F = curveIntegral(c.speedCurve), x = u * 256, i = Math.min(255, Math.floor(x))
+    off = srcLen * (F[i] + (F[i + 1] - F[i]) * (x - i))
+  }
+  return c.reverse ? srcLen - off : off
+}
+/** Instantaneous playback rate of a clip's source. */
+export function instantSpeed(c: Clip, local: number) {
+  const dt = 1 / 60
+  return Math.abs(sourceOffset(c, Math.min(c.duration, local + dt)) - sourceOffset(c, Math.max(0, local))) / dt
+}
 export function videoClipTime(c: Clip, t: number) {
-  return c.inPoint + Math.max(0, t - c.start) * c.speed
+  return c.inPoint + sourceOffset(c, Math.max(0, Math.min(c.duration, t - c.start)))
+}
+
+/** Natural (fitted, unscaled) size of a clip's content in project pixels. */
+let measureCtx: CanvasRenderingContext2D | null = null
+export function clipBox(p: Project, c: Clip, local: number) {
+  const W = p.width, H = p.height
+  let w = W, h = H
+  if (c.kind === 'text') {
+    if (!measureCtx) measureCtx = document.createElement('canvas').getContext('2d')!
+    const s = c.textStyle!
+    measureCtx.font = `${s.italic ? 'italic ' : ''}${s.bold ? 'bold ' : ''}${s.size}px ${s.font}`
+    const lines = (c.text ?? '').split('\n')
+    w = Math.max(...lines.map((l) => measureCtx!.measureText(l).width), 10) + (s.background ? s.size * 0.6 : s.strokeWidth * 2)
+    h = lines.length * s.size * 1.2 + (s.background ? s.size * 0.3 : 0)
+  } else if (c.kind !== 'color') {
+    const src = clipSource(p, c, local)
+    if (src && c.fit !== 'stretch') { const r = c.fit === 'contain' ? Math.min(W / src.w, H / src.h) : Math.max(W / src.w, H / src.h); w = src.w * r; h = src.h * r }
+  }
+  const tf = clipTransformAt(c, local)
+  return { cx: W / 2 + tf.x, cy: H / 2 + tf.y, w: w * tf.scale, h: h * tf.scale, rot: tf.rotation, scale: tf.scale }
 }

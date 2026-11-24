@@ -24,7 +24,15 @@ export default defineConfig({
           { src: 'icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
-      workbox: { maximumFileSizeToCacheInBytes: 8 * 1024 * 1024, globPatterns: ['**/*.{js,css,html,svg,png,woff2}'] },
+      workbox: {
+        maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
+        globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        globIgnores: ['**/transformers*.js', '**/ort*.js'],
+        runtimeCaching: [
+          { urlPattern: /\/(mediapipe|models)\//, handler: 'CacheFirst', options: { cacheName: 'chiken-ai', expiration: { maxEntries: 20 } } },
+          { urlPattern: /huggingface\.co|hf\.co|cdn\.jsdelivr\.net/, handler: 'CacheFirst', options: { cacheName: 'chiken-speech', expiration: { maxEntries: 60 } } },
+        ],
+      },
     }),
   ],
 })

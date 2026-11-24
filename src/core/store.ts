@@ -140,6 +140,12 @@ export const useStore = create<State>((set, get) => ({
         (t) => t.kind === wantKind && !project.clips.some((c) => c.trackId === t.id && c.start < start + dur && clipEnd(c) > start),
       )
     }
+    // overlays (animations) must sit above any video playing at the same time
+    if (track && m.kind === 'animation') {
+      const ti = project.tracks.indexOf(track)
+      const coveredAbove = project.tracks.slice(0, ti).some((t) => t.kind === 'video' && project.clips.some((c) => c.trackId === t.id && c.start < start + dur && clipEnd(c) > start))
+      if (coveredAbove) track = undefined
+    }
     let newTrackObj: Track | null = null
     if (!track) {
       newTrackObj = newTrack(wantKind, project.tracks.filter((t) => t.kind === wantKind).length + 1)

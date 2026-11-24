@@ -7,10 +7,14 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "predev": "node scripts/copy-assets.mjs",
+    "prebuild": "node scripts/copy-assets.mjs"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
+    "@huggingface/transformers": "^4.3.2",
+    "@mediapipe/tasks-vision": "^1.2.3",
     "gifenc": "^1.0.3",
     "idb-keyval": "^6.3.0",
     "jszip": "^3.10.2",

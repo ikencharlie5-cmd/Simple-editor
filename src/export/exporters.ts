@@ -10,6 +10,7 @@ import { renderFrame, videoClipTime } from '../video/render'
 import { mixdown } from '../audio/engine'
 import { preloadAnimation, renderAnimation } from '../animator/render'
 import { saveBlob } from '../core/db'
+import { loadSegmenter } from '../core/segment'
 
 export type Progress = (p: number, label?: string) => void
 export class Cancelled extends Error {}
@@ -81,6 +82,7 @@ export async function exportVideo(p: Project, o: VideoExportOpts, onProgress: Pr
   ctx.imageSmoothingQuality = 'high'
 
   // preload resources
+  if (p.clips.some((c) => c.removeBg)) { onProgress(0, 'Loading background-removal model…'); await loadSegmenter() }
   for (const a of p.animations) await preloadAnimation(a)
   for (const c of p.clips) if (c.kind === 'image' && c.mediaId) await getImage(c.mediaId)
   for (const c of p.clips) if (c.kind === 'video' && c.mediaId) await getVideo(c.id, c.mediaId)

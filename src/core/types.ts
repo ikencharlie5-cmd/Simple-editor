@@ -98,6 +98,10 @@ export interface Clip {
   fit: 'contain' | 'cover' | 'stretch'
   flipH?: boolean
   flipV?: boolean
+  reverse?: boolean
+  speedCurve?: string
+  removeBg?: boolean
+  removeBgSoftness?: number
 }
 
 export interface Project {
@@ -112,6 +116,8 @@ export interface Project {
   media: MediaItem[]
   animations: AnimationDoc[]
   updatedAt: number
+  /** beat / cue markers on the timeline, in seconds */
+  markers?: number[]
 }
 
 /* ---------------- Animator ---------------- */
@@ -172,6 +178,8 @@ export interface AnimationDoc {
   background: string // '' = transparent
   layers: AnimLayer[]
   onionSkin: boolean
+  /** a video shown underneath the animation for reference / rotoscoping */
+  refVideo?: { mediaId: string; offset: number; opacity: number; fit: 'contain' | 'cover'; include: boolean }
 }
 
 export const DEFAULT_FILTERS: Filters = {

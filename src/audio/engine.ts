@@ -13,14 +13,33 @@ export function audibleClips(p: Project) {
   })
 }
 
+const revCache = new Map<string, AudioBuffer>()
+function reversedSegment(buf: AudioBuffer, start: number, len: number) {
+  const key = `${buf.length}:${buf.sampleRate}:${start.toFixed(3)}:${len.toFixed(3)}:${buf.getChannelData(0)[1000] ?? 0}`
+  const hit = revCache.get(key)
+  if (hit) return hit
+  const s0 = Math.floor(start * buf.sampleRate), n = Math.max(1, Math.min(buf.length - s0, Math.floor(len * buf.sampleRate)))
+  const out = new AudioBuffer({ numberOfChannels: buf.numberOfChannels, length: n, sampleRate: buf.sampleRate })
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const src = buf.getChannelData(ch), dst = out.getChannelData(ch)
+    for (let i = 0; i < n; i++) dst[i] = src[s0 + n - 1 - i] ?? 0
+  }
+  if (revCache.size > 20) revCache.delete(revCache.keys().next().value!)
+  revCache.set(key, out)
+  return out
+}
+
 function scheduleClip(ctx: BaseAudioContext, dest: AudioNode, p: Project, c: Clip, buf: AudioBuffer, from: number, when: number) {
   const tr = p.tracks.find((t) => t.id === c.trackId)!
   const startT = Math.max(from, c.start)
   const end = clipEnd(c)
   if (startT >= end) return null
   const src = ctx.createBufferSource()
+  let rate = c.speed
+  let offsetBase = c.inPoint
+  if (c.reverse) { buf = reversedSegment(buf, c.inPoint, c.duration * c.speed); offsetBase = 0 }
   src.buffer = buf
-  src.playbackRate.value = c.speed
+  src.playbackRate.value = rate
   const gain = ctx.createGain()
   const vol = c.volume * tr.volume
   const at = when + (startT - from)
@@ -41,7 +60,8 @@ function scheduleClip(ctx: BaseAudioContext, dest: AudioNode, p: Project, c: Cli
     g.linearRampToValueAtTime(0, stopAt)
   }
   src.connect(gain).connect(dest)
-  const offset = c.inPoint + (startT - c.start) * c.speed
+  rate = c.speed
+  const offset = offsetBase + (startT - c.start) * c.speed
   if (offset >= buf.duration) return null
   src.start(at, offset)
   src.stop(stopAt)

@@ -1,11 +1,15 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useStore, makeClip, projectDuration, newTrack, clipEnd } from '../core/store'
 import type { Clip, ClipAnim, Project, Transform, TransitionType } from '../core/types'
 import { DEFAULT_FILTERS, DEFAULT_TEXT_STYLE } from '../core/types'
 import { MediaBin } from './MediaBin'
 import { Timeline } from './Timeline'
 import { usePreview } from './player'
-import { FILTER_PRESETS, clipTransformAt, renderFrame } from './render'
+import { FILTER_PRESETS, clipTransformAt, renderFrame, clipBox, SPEED_CURVES } from './render'
+import { mixdown } from '../audio/engine'
+import { transcribe, splitCaptions } from '../core/captions'
+import { loadSegmenter, segmenterStatus } from '../core/segment'
+import { Modal } from '../ui/controls'
 import { Check, Color, Section, Select, Slider, fmtTime } from '../ui/controls'
 import { IN_PRESETS, LOOP_PRESETS, setKey, EASES } from '../core/anim'
 import type { Ease } from '../core/types'
@@ -48,6 +52,7 @@ function LeftPanel() {
   const project = useStore((s) => s.project)
   const update = useStore((s) => s.update)
   const sel = project.clips.find((c) => c.id === selected[0])
+  const [captions, setCaptions] = useState(false)
   const applyToSel = (fn: (c: Clip) => void) => {
     if (!selected.length) return useStore.getState().notify('Select a clip on the timeline first')
     update((p) => p.clips.filter((c) => selected.includes(c.id)).forEach(fn))
@@ -74,6 +79,7 @@ function LeftPanel() {
         </>}
         {tab === 'text' && <div className="section-body" style={{ paddingTop: 10 }}>
           <button className="primary" onClick={() => addTextClip({}, 'Your text')}>＋ Add text</button>
+          <button onClick={() => setCaptions(true)}>🎙 Auto captions…</button>
           <div className="grid2">
             {TEXT_TEMPLATES.map((t) => (
               <button key={t.name} style={{ height: 54, fontFamily: t.style.font, color: t.style.color, background: t.style.background || undefined }}
@@ -121,6 +127,7 @@ function LeftPanel() {
         </div>}
         {tab === 'project' && <ProjectSettings project={project} />}
       </div>
+      {captions && <CaptionsDialog onClose={() => setCaptions(false)} />}
     </div>
   )
 }
@@ -236,6 +243,8 @@ function Inspector() {
           x.speed = v
           x.duration = Math.max(0.1, srcLen / v)
         })} />
+        {timed && <Select label="Speed curve" value={c.speedCurve ?? 'none'} options={Object.keys(SPEED_CURVES)} onChange={(v) => set((x) => { x.speedCurve = v }, true)} />}
+        {timed && <Check label="Reverse ⇆" value={!!c.reverse} onChange={(v) => set((x) => { x.reverse = v }, true)} />}
         <div className="row">{[0.25, 0.5, 1, 1.5, 2, 4].map((s) => <button key={s} className={c.speed === s ? 'active' : ''} onClick={() => set((x) => { const srcLen = x.duration * x.speed; x.speed = s; x.duration = srcLen / s }, true)}>{s}x</button>)}</div>
       </Section>}
       {hasAudio && <Section title="Audio">
@@ -255,6 +264,13 @@ function Inspector() {
         <Select label="Loop" value={c.animLoop} options={LOOP_PRESETS as ClipAnim[]} onChange={(v) => set((x) => { x.animLoop = v }, true)} />
         <Select label="Transition" value={c.transitionIn.type} options={TRANSITIONS} onChange={(v) => set((x) => { x.transitionIn.type = v }, true)} />
       </Section>}
+      {(c.kind === 'video' || c.kind === 'image') && <Section title="Remove background (AI)" defaultOpen={!!c.removeBg}>
+        <Check label="Cut out people (no green screen needed)" value={!!c.removeBg} onChange={(v) => { if (v) void loadSegmenter(); set((x) => { x.removeBg = v }, true) }} />
+        {c.removeBg && <>
+          <Slider label="Edge softness" min={0} max={1} value={c.removeBgSoftness ?? 0.5} onChange={(v) => set((x) => { x.removeBgSoftness = v })} />
+          <div className="hint">{segmenterStatus() === 'failed' ? 'The cut-out model failed to load in this browser.' : 'Runs on your device. Works best with one person clearly in frame. Put another clip on a track below for a new background.'}</div>
+        </>}
+      </Section>}
       {(c.kind === 'video' || c.kind === 'image') && <Section title="Chroma key (green screen)" defaultOpen={false}>
         <Check label="Enabled" value={!!c.chromaKey?.enabled} onChange={(v) => set((x) => { x.chromaKey = { color: '#00ff00', tolerance: 0.35, ...x.chromaKey, enabled: v } }, true)} />
         {c.chromaKey?.enabled && <>
@@ -271,12 +287,148 @@ function Inspector() {
   )
 }
 
+function setClipTransform(id: string, vals: Partial<Transform>, undoable = false) {
+  const st = useStore.getState()
+  st.update((p) => {
+    const x = p.clips.find((y) => y.id === id)
+    if (!x) return
+    const local = st.playhead - x.start
+    for (const [k, v] of Object.entries(vals) as [keyof Transform, number][]) {
+      if (x.keyframes?.[k]?.length && local >= 0 && local <= x.duration) x.keyframes[k] = setKey(x.keyframes[k], local, v, x.keyframes[k]!.at(-1)?.ease)
+      else x.transform[k] = v
+    }
+  }, undoable)
+}
+
+/** Resize / rotate handles drawn over the preview for the selected clip. */
+function TransformHandles({ stage }: { stage: React.RefObject<HTMLDivElement | null> }) {
+  const project = useStore((s) => s.project)
+  const playhead = useStore((s) => s.playhead)
+  const playing = useStore((s) => s.playing)
+  const sel = useStore((s) => s.selectedClipIds[0])
+  const [size, setSize] = useState({ w: 0, h: 0 })
+  useEffect(() => {
+    const el = stage.current
+    if (!el) return
+    const ro = new ResizeObserver(() => setSize({ w: el.clientWidth, h: el.clientHeight }))
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [stage])
+  const c = project.clips.find((x) => x.id === sel)
+  if (!c || c.kind === 'audio' || playing || playhead < c.start || playhead >= clipEnd(c) || !size.w) return null
+  const cw = size.w - 24, ch = size.h - 24
+  const k = Math.min(cw / project.width, ch / project.height)
+  const ox = 12 + (cw - project.width * k) / 2, oy = 12 + (ch - project.height * k) / 2
+  const b = clipBox(project, c, playhead - c.start)
+  const a = (b.rot * Math.PI) / 180, ca = Math.cos(a), sa = Math.sin(a)
+  const pt = (u: number, v: number) => ({ x: ox + (b.cx + u * ca - v * sa) * k, y: oy + (b.cy + u * sa + v * ca) * k })
+  const corners = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => pt((u * b.w) / 2, (v * b.h) / 2))
+  const rotH = pt(0, -b.h / 2 - 28 / k)
+  const center = pt(0, 0)
+  const drag = (e: React.PointerEvent, mode: 'scale' | 'rotate') => {
+    e.stopPropagation(); e.preventDefault()
+    const r = stage.current!.getBoundingClientRect()
+    const P = (ev: { clientX: number; clientY: number }) => ({ x: ev.clientX - r.left, y: ev.clientY - r.top })
+    const p0 = P(e), d0 = Math.hypot(p0.x - center.x, p0.y - center.y), a0 = Math.atan2(p0.y - center.y, p0.x - center.x)
+    const tf0 = clipTransformAt(c, playhead - c.start)
+    useStore.getState().checkpoint()
+    const move = (ev: PointerEvent) => {
+      const p1 = P(ev)
+      if (mode === 'scale') setClipTransform(c.id, { scale: Math.max(0.02, tf0.scale * (Math.hypot(p1.x - center.x, p1.y - center.y) / Math.max(1, d0))) })
+      else {
+        let rot = tf0.rotation + ((Math.atan2(p1.y - center.y, p1.x - center.x) - a0) * 180) / Math.PI
+        if (ev.shiftKey) rot = Math.round(rot / 15) * 15
+        setClipTransform(c.id, { rotation: Math.round(rot * 10) / 10 })
+      }
+    }
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up) }
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up)
+  }
+  return (
+    <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible' }}>
+      <polygon points={corners.map((q) => `${q.x},${q.y}`).join(' ')} fill="none" stroke="#a78bfa" strokeWidth={1.5} strokeDasharray="5 4" />
+      <line x1={(corners[0].x + corners[1].x) / 2} y1={(corners[0].y + corners[1].y) / 2} x2={rotH.x} y2={rotH.y} stroke="#a78bfa" />
+      {corners.map((q, i) => <rect key={i} x={q.x - 6} y={q.y - 6} width={12} height={12} fill="#fff" stroke="#8b5cf6" strokeWidth={2} style={{ pointerEvents: 'all', cursor: 'nwse-resize' }} onPointerDown={(e) => drag(e, 'scale')} />)}
+      <circle cx={rotH.x} cy={rotH.y} r={7} fill="#8b5cf6" stroke="#fff" strokeWidth={2} style={{ pointerEvents: 'all', cursor: 'grab' }} onPointerDown={(e) => drag(e, 'rotate')}><title>Drag to rotate (Shift snaps 15°)</title></circle>
+    </svg>
+  )
+}
+
+function CaptionsDialog({ onClose }: { onClose: () => void }) {
+  const project = useStore((s) => s.project)
+  const [status, setStatus] = useState<{ msg: string; p?: number } | null>(null)
+  const [model, setModel] = useState<'tiny' | 'base'>('tiny')
+  const [words, setWords] = useState(5)
+  const [style, setStyle] = useState<'bold' | 'box' | 'yellow'>('bold')
+  const [script, setScript] = useState('')
+  const [busy, setBusy] = useState(false)
+  const dur = projectDuration(project)
+  const STYLES = {
+    bold: { size: 72, color: '#ffffff', stroke: '#000000', strokeWidth: 6, background: '', bold: true },
+    box: { size: 60, color: '#ffffff', stroke: '#000000', strokeWidth: 0, background: '#000000b3', bold: true },
+    yellow: { size: 76, color: '#ffe14d', stroke: '#000000', strokeWidth: 7, background: '', bold: true, font: 'Impact, sans-serif' },
+  }
+  const place = (chunks: { text: string; start: number; end: number }[]) => {
+    const st = useStore.getState()
+    st.update((p) => {
+      const tr = newTrack('text', 1); tr.name = 'Captions'
+      p.tracks.unshift(tr)
+      for (const c of chunks) {
+        p.clips.push(makeClip('text', tr.id, c.start, Math.max(0.3, c.end - c.start), {
+          name: c.text, text: c.text, textStyle: { ...DEFAULT_TEXT_STYLE, ...STYLES[style] },
+          transform: { x: 0, y: Math.round(p.height * 0.32), scale: 1, rotation: 0, opacity: 1 }, animIn: 'pop',
+        }))
+      }
+    })
+    st.notify(`Added ${chunks.length} captions on a new "Captions" track`)
+    onClose()
+  }
+  const auto = async () => {
+    if (dur <= 0) return useStore.getState().notify('Add clips with speech first')
+    setBusy(true)
+    try {
+      const buf = await mixdown(project, 0, dur, 16000)
+      const chunks = await transcribe(buf, model, (msg, p) => setStatus({ msg, p }))
+      if (!chunks.length) { setStatus({ msg: 'No speech was found.' }); return }
+      place(splitCaptions(chunks, words))
+    } catch (e) {
+      setStatus({ msg: 'Could not transcribe: ' + (e as Error).message + '. Check your internet connection (needed once to download the speech model).' })
+    } finally { setBusy(false) }
+  }
+  const fromScript = () => {
+    const lines = script.split(/\n+|(?<=[.!?])\s+/).map((l) => l.trim()).filter(Boolean)
+    if (!lines.length || dur <= 0) return
+    const total = lines.reduce((s, l) => s + l.length, 0)
+    let t = 0
+    place(lines.map((l) => { const d = (l.length / total) * dur; const c = { text: l, start: t, end: t + d }; t += d; return c }))
+  }
+  return (
+    <Modal title="Captions" onClose={() => !busy && onClose()}>
+      <b>🎙 Auto captions (speech to text)</b>
+      <div className="hint">Listens to your timeline's audio and writes timed captions. The speech model runs on your Chromebook. It downloads once (needs internet the first time), then works offline.</div>
+      <div className="row">
+        <Select label="Accuracy" value={model} options={[{ value: 'tiny', label: 'Fast' }, { value: 'base', label: 'More accurate (slower)' }]} onChange={setModel} />
+      </div>
+      <Slider label="Words / line" min={1} max={12} step={1} value={words} onChange={setWords} />
+      <div className="row">{(['bold', 'box', 'yellow'] as const).map((s2) => <span key={s2} className={'chip ' + (style === s2 ? 'on' : '')} onClick={() => setStyle(s2)}>{{ bold: 'White outline', box: 'Black box', yellow: 'Yellow meme' }[s2]}</span>)}</div>
+      <button className="primary" disabled={busy} onClick={() => void auto()}>{busy ? 'Working…' : 'Generate captions'}</button>
+      {status && <div className="section-body" style={{ padding: 0 }}>{status.p !== undefined && <div className="progress"><div style={{ width: `${status.p * 100}%` }} /></div>}<span className="small">{status.msg}</span></div>}
+      <hr style={{ borderColor: 'var(--line)', width: '100%' }} />
+      <b>📝 Captions from a script</b>
+      <div className="hint">Paste your script; each line or sentence becomes a caption spread across the video by length.</div>
+      <textarea rows={4} value={script} onChange={(e) => setScript(e.target.value)} placeholder="Type or paste your script here…" />
+      <button disabled={!script.trim()} onClick={fromScript}>Add script captions</button>
+    </Modal>
+  )
+}
+
 function Preview() {
   const ref = useRef<HTMLCanvasElement>(null)
   const project = useStore((s) => s.project)
   const playing = useStore((s) => s.playing)
   const playhead = useStore((s) => s.playhead)
   usePreview(ref)
+  const stageRef = useRef<HTMLDivElement>(null)
   const scale = Math.min(1, 1280 / Math.max(project.width, project.height))
 
   // drag to move selected clip in preview; wheel to scale
@@ -311,12 +463,13 @@ function Preview() {
   }
   return (
     <div className="preview-wrap">
-      <div className="preview-stage">
+      <div className="preview-stage" ref={stageRef}>
         <canvas ref={ref} width={Math.round(project.width * scale)} height={Math.round(project.height * scale)}
           style={{ aspectRatio: `${project.width}/${project.height}`, cursor: 'move' }}
           onPointerDown={onDown} onWheel={onWheel}
           // render at reduced resolution for preview
           data-scale={scale} />
+        <TransformHandles stage={stageRef} />
       </div>
       <div className="preview-bar">
         <button onClick={() => useStore.getState().setPlayhead(0)}>⏮</button>

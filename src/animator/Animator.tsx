@@ -6,7 +6,9 @@ import { ANIM_PROPS } from '../core/types'
 import { EASES, IN_PRESETS, LOOP_PRESETS, setKey, clamp } from '../core/anim'
 import { drawLayer, layerSize, layerState, layerValue, renderAnimation, preloadAnimation } from './render'
 import { Check, Color, Section, Select, Slider, fmtTime } from '../ui/controls'
-import { getImage, importFile, pickFiles } from '../core/media'
+import { getImage, importFile, pickFiles, getVideo, peekVideo } from '../core/media'
+import { newTrack, clipEnd, makeClip } from '../core/store'
+import { drawVideoFit, trackPoint } from './track'
 
 const BASE: Record<AnimProp, number> = { x: 0, y: 0, scale: 1, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1, reveal: 1, blur: 0, hue: 0 }
 const PROP_RANGE: Record<AnimProp, [number, number, number]> = {
@@ -62,6 +64,11 @@ export function Animator() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const drawCanvas = useRef<HTMLCanvasElement | null>(null)
   const [stageSize, setStageSize] = useState({ w: 800, h: 450 })
+  const [, setRefTick] = useState(0)
+  const [trackPick, setTrackPick] = useState(false)
+  const [trackStatus, setTrackStatus] = useState<string | null>(null)
+  const trackCancel = useRef(false)
+  const [keepOffset, setKeepOffset] = useState(false)
 
   const layer = doc?.layers.find((l) => l.id === layerId)
 
@@ -141,6 +148,9 @@ export function Animator() {
       for (let y = 0; y < doc.height; y += sz) for (let x = (Math.floor(y / sz) % 2) * sz; x < doc.width; x += sz * 2) ctx.fillRect(x, y, sz, sz)
     }
     ctx.beginPath(); ctx.rect(0, 0, doc.width, doc.height); ctx.clip()
+    if (doc.background) { ctx.fillStyle = doc.background; ctx.fillRect(0, 0, doc.width, doc.height) }
+    const rv = doc.refVideo && peekVideo('animref-' + doc.id)
+    if (rv && rv.readyState >= 2) { ctx.save(); ctx.globalAlpha = doc.refVideo!.opacity; drawVideoFit(ctx, rv, doc.width, doc.height, doc.refVideo!.fit); ctx.restore() }
     // onion skin for drawing layer
     if (doc.onionSkin && layer?.kind === 'drawing' && !playing) {
       for (const [off, alpha] of [[-1, 0.25], [1, 0.15]] as const) {
@@ -151,7 +161,6 @@ export function Animator() {
         }
       }
     }
-    if (doc.background) { ctx.fillStyle = doc.background; ctx.fillRect(0, 0, doc.width, doc.height) }
     for (let i = doc.layers.length - 1; i >= 0; i--) {
       const l = doc.layers[i]
       if (l.kind === 'drawing' && l.id === layer?.id && !playing && drawCanvas.current && mode !== 'select') {
@@ -184,6 +193,47 @@ export function Animator() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layer?.id, frameIdx, layer?.frames?.[frameIdx]?.dataUrl, doc?.width, doc?.height])
 
+  // reference video under the animation
+  const refKey = doc ? 'animref-' + doc.id : ''
+  useEffect(() => {
+    if (!doc?.refVideo) return
+    void getVideo(refKey, doc.refVideo.mediaId).then((v) => { if (v) { v.onseeked = () => setRefTick((x) => x + 1); setRefTick((x) => x + 1) } })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?.refVideo?.mediaId, refKey])
+  useEffect(() => {
+    const v = doc?.refVideo ? peekVideo(refKey) : undefined
+    if (!v || !doc?.refVideo) return
+    const target = Math.max(0, time + doc.refVideo.offset)
+    if (playing) {
+      if (v.paused) { v.currentTime = target; void v.play().catch(() => {}) }
+      else if (Math.abs(v.currentTime - target) > 0.25) v.currentTime = target
+    } else {
+      if (!v.paused) v.pause()
+      if (Math.abs(v.currentTime - target) > 0.01) v.currentTime = target
+    }
+  }, [time, playing, doc?.refVideo, refKey])
+
+  const runTrack = async (pt: { x: number; y: number }) => {
+    if (!doc?.refVideo || !layer) return
+    const l0 = layer
+    trackCancel.current = false
+    setTrackStatus('Tracking… 0%')
+    try {
+      const t0 = Math.max(time, l0.start)
+      const ox = keepOffset ? layerValue(l0, 'x', t0) - (pt.x - doc.width / 2) : 0, oy = keepOffset ? layerValue(l0, 'y', t0) - (pt.y - doc.height / 2) : 0
+      const pts = await trackPoint(doc, pt, t0, l0.end, (p) => setTrackStatus(`Tracking… ${Math.round(p * 100)}%`), () => trackCancel.current)
+      if (!pts.length) { setTrackStatus('Nothing to track here'); return }
+      edit((a) => {
+        const l = a.layers.find((x) => x.id === l0.id)!
+        const s0 = t0 - l.start, s1 = pts[pts.length - 1].t - l.start
+        const keep = (k?: typeof l.keys.x) => (k ?? []).filter((q) => q.t < s0 - 1e-3 || q.t > s1 + 1e-3)
+        l.keys.x = [...keep(l.keys.x), ...pts.map((q) => ({ t: q.t - l.start, value: Math.round((q.x - doc.width / 2 + ox) * 10) / 10, ease: 'linear' as Ease }))].sort((p, q) => p.t - q.t)
+        l.keys.y = [...keep(l.keys.y), ...pts.map((q) => ({ t: q.t - l.start, value: Math.round((q.y - doc.height / 2 + oy) * 10) / 10, ease: 'linear' as Ease }))].sort((p, q) => p.t - q.t)
+      })
+      setTrackStatus(`Tracked ${pts.length} frames ✓`)
+    } catch (e) { setTrackStatus('Tracking failed: ' + (e as Error).message) }
+  }
+
   const toDoc = (e: { clientX: number; clientY: number }) => {
     const r = stageRef.current!.getBoundingClientRect()
     return { x: (e.clientX - r.left - view.ox) / view.s, y: (e.clientY - r.top - view.oy) / view.s }
@@ -201,6 +251,7 @@ export function Animator() {
   const onStageDown = (e: React.PointerEvent) => {
     if (!doc) return
     const p0 = toDoc(e)
+    if (trackPick) { setTrackPick(false); void runTrack(p0); return }
     if (mode !== 'select' && layer?.kind === 'drawing') {
       const c = drawCanvas.current!
       const ctx = c.getContext('2d')!
@@ -264,7 +315,19 @@ export function Animator() {
       st.addMedia(m)
     }
     const media: MediaItem = m
-    st.addClipFromMedia(media)
+    const animClipId = st.addClipFromMedia(media)
+    const rvm = doc.refVideo?.include ? st.project.media.find((x) => x.id === doc.refVideo!.mediaId) : undefined
+    if (rvm && animClipId) {
+      const rv = doc.refVideo!
+      useStore.getState().update((p) => {
+        const ac = p.clips.find((c) => c.id === animClipId)!
+        const ti = p.tracks.findIndex((t) => t.id === ac.trackId)
+        const dur = Math.min(ac.duration, Math.max(0.1, rvm.duration - rv.offset))
+        let tr = p.tracks.slice(ti + 1).find((t) => t.kind === 'video' && !p.clips.some((c) => c.trackId === t.id && c.start < ac.start + dur && clipEnd(c) > ac.start))
+        if (!tr) { tr = newTrack('video', p.tracks.filter((t) => t.kind === 'video').length + 1); p.tracks.splice(ti + 1, 0, tr) }
+        p.clips.push(makeClip('video', tr.id, ac.start, dur, { mediaId: rvm.id, name: rvm.name, inPoint: rv.offset, fit: rv.fit }))
+      })
+    }
     st.setTab('video')
     st.notify(`"${doc.name}" added to the video timeline. Edits in the Animator update it automatically.`)
   }
@@ -384,6 +447,31 @@ export function Animator() {
             <button className="icon" title="Move down" disabled={i === doc.layers.length - 1} onClick={(e) => { e.stopPropagation(); edit((a) => { const [x] = a.layers.splice(i, 1); a.layers.splice(i + 1, 0, x) }) }}>▼</button>
           </div>
         ))}
+        <Section title="🎞 Video underneath" defaultOpen={!!doc.refVideo}>
+          <div className="hint">Put a video under your animation to animate over it (rotoscope) and track real motion.</div>
+          <Select value={doc.refVideo?.mediaId ?? ''} options={[{ value: '', label: 'None' }, ...project.media.filter((m) => m.kind === 'video').map((m) => ({ value: m.id, label: m.name }))]}
+            onChange={(v) => edit((a) => { a.refVideo = v ? { mediaId: v, offset: 0, opacity: 1, fit: 'contain', include: true, ...(a.refVideo?.mediaId === v ? a.refVideo : {}) } : undefined })} />
+          <button onClick={async () => {
+            const [f] = await pickFiles('video/*', false)
+            if (!f) return
+            useStore.getState().notify('Importing video…')
+            const m = await importFile(f)
+            if (!m) return
+            useStore.getState().addMedia(m)
+            edit((a) => { a.refVideo = { mediaId: m.id, offset: 0, opacity: 1, fit: 'contain', include: true } })
+          }}>＋ Import a video…</button>
+          {doc.refVideo && (() => {
+            const vm = project.media.find((m) => m.id === doc.refVideo!.mediaId)
+            return <>
+              <Slider label="Opacity" min={0} max={1} value={doc.refVideo.opacity} onChange={(v) => edit((a) => { a.refVideo!.opacity = v }, false)} />
+              <Slider label="Start at (s)" min={0} max={Math.max(0.1, (vm?.duration ?? 1) - 0.1)} value={doc.refVideo.offset} onChange={(v) => edit((a) => { a.refVideo!.offset = v }, false)} />
+              <Select label="Fit" value={doc.refVideo.fit} options={['contain', 'cover'] as const} onChange={(v) => edit((a) => { a.refVideo!.fit = v })} />
+              <Check label="Include video when sending to the editor" value={doc.refVideo.include} onChange={(v) => edit((a) => { a.refVideo!.include = v })} />
+              {vm && <button onClick={() => edit((a) => { const d = Math.max(0.5, vm.duration - a.refVideo!.offset); a.duration = Math.round(d * 100) / 100; a.layers.forEach((l) => { l.end = a.duration; l.start = Math.min(l.start, a.duration - 0.1) }) })}>Match animation length to video</button>}
+              {vm && <button onClick={() => edit((a) => { a.width = vm.width || a.width; a.height = vm.height || a.height })}>Match size to video ({vm.width}×{vm.height})</button>}
+            </>
+          })()}
+        </Section>
         <Section title="Animation settings" defaultOpen={false}>
           <div className="grid2">
             <label className="field"><span>W</span><input type="number" value={doc.width} onChange={(e) => edit((a) => { a.width = Math.max(16, +e.target.value) })} /></label>
@@ -412,7 +500,7 @@ export function Animator() {
           <span style={{ flex: 1 }} />
           <Check label="Auto-key" value={autoKey} onChange={setAutoKey} />
         </div>
-        <div className="stage" ref={stageRef} onPointerDown={onStageDown} style={{ cursor: mode === 'select' ? 'default' : 'crosshair' }}>
+        <div className="stage" ref={stageRef} onPointerDown={onStageDown} style={{ cursor: trackPick || mode !== 'select' ? 'crosshair' : 'default' }}>
           <canvas ref={canvasRef} />
         </div>
         <div className="preview-bar">
@@ -475,6 +563,17 @@ export function Animator() {
               }
             })}>{n}</button>)}</div>
           </Section>
+          {layer.kind !== 'drawing' && <Section title="🎯 Motion tracking" defaultOpen={!!doc.refVideo}>
+            {!doc.refVideo ? <div className="hint">Add a video underneath (left panel) to track real motion.</div> : <>
+              <div className="hint">Move the playhead to where tracking should start, click "Pick point", then click a clear, high-contrast spot in the video (an eye, a logo, a corner). This layer will follow it.</div>
+              <div className="row">
+                <button className={trackPick ? 'active' : 'primary'} onClick={() => setTrackPick(!trackPick)}>{trackPick ? 'Click the video…' : '🎯 Pick point & track'}</button>
+                {trackStatus?.startsWith('Tracking…') && <button onClick={() => { trackCancel.current = true }}>Stop</button>}
+              </div>
+              <Check label="Keep the layer's current distance from the point" value={keepOffset} onChange={setKeepOffset} />
+              {trackStatus && <div className="small">{trackStatus}</div>}
+            </>}
+          </Section>}
           <Section title="Preset animations">
             <Select label="In" value={layer.presetIn ?? 'none'} options={IN_PRESETS} onChange={(v) => editLayer((l) => { l.presetIn = v })} />
             <Select label="Out" value={layer.presetOut ?? 'none'} options={IN_PRESETS} onChange={(v) => editLayer((l) => { l.presetOut = v })} />
