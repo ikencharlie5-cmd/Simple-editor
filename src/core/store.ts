@@ -175,10 +175,14 @@ export const useStore = create<State>((set, get) => ({
 /* ---------- Autosave ---------- */
 let saveTimer: ReturnType<typeof setTimeout> | undefined
 export async function initPersistence() {
-  const lastId = await loadDoc<string>('current-project')
-  if (lastId) {
-    const p = await loadDoc<Project>('project:' + lastId)
-    if (p) useStore.setState({ project: p })
+  try {
+    const lastId = await loadDoc<string>('current-project')
+    if (lastId) {
+      const p = await loadDoc<Project>('project:' + lastId)
+      if (p) useStore.setState({ project: p })
+    }
+  } catch (e) {
+    console.warn('Browser storage unavailable; autosave is off', e)
   }
   useStore.setState({ loaded: true, saveStatus: 'saved' })
   useStore.subscribe((s, prev) => {
@@ -187,8 +191,10 @@ export async function initPersistence() {
     saveTimer = setTimeout(async () => {
       useStore.setState({ saveStatus: 'saving' })
       const p = useStore.getState().project
-      await saveDoc('project:' + p.id, p)
-      await saveDoc('current-project', p.id)
+      try {
+        await saveDoc('project:' + p.id, p)
+        await saveDoc('current-project', p.id)
+      } catch { /* storage unavailable */ }
       useStore.setState({ saveStatus: 'saved' })
     }, 1200)
   })

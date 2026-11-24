@@ -742,7 +742,7 @@ export function PhotoEditor() {
   useEffect(() => {
     if (loadedOnce) return
     loadedOnce = true
-    void loadPhotoDoc(doc).then((ok) => { setTimeout(fitView, 50); if (!ok) bump() })
+    void loadPhotoDoc(doc).catch(() => false).then((ok) => { setTimeout(fitView, 50); if (!ok) bump() })
   }, [])
 
   // keyboard shortcuts (Photoshop-style)
