@@ -227,7 +227,7 @@ export async function exportSpriteSheet(src: FrameSource, o: { scale: number; fp
   const png = await new Promise<Blob>((r) => sheet.toBlob((b) => r(b!), 'image/png'))
   const meta = {
     frames: frames.map((_, i) => ({ frame: i, x: (i % cols) * w, y: Math.floor(i / cols) * h, w, h, duration: Math.round(1000 / o.fps) })),
-    meta: { app: 'Chicken Studios', size: { w: sheet.width, h: sheet.height }, frameSize: { w, h }, fps: o.fps, columns: cols, rows },
+    meta: { app: 'Chiken', size: { w: sheet.width, h: sheet.height }, frameSize: { w, h }, fps: o.fps, columns: cols, rows },
   }
   const zip = new JSZip()
   zip.file('spritesheet.png', png)
@@ -249,11 +249,11 @@ export function scaledCanvas(src: HTMLCanvasElement, scale: number, bg?: string)
   return c
 }
 
-/* ---------------- project files (.chicken) ---------------- */
+/* ---------------- project files (.chiken) ---------------- */
 export async function exportProjectFile(p: Project, photo: { meta: unknown; layers: { id: string; blob: Blob }[] } | null) {
   const zip = new JSZip()
   zip.file('project.json', JSON.stringify(p))
-  zip.file('format.txt', 'Chicken Studios project v1')
+  zip.file('format.txt', 'Chiken project v1')
   for (const m of p.media) {
     if (m.kind === 'animation') continue
     const b = await getBlob(m.id)
@@ -269,7 +269,7 @@ export async function exportProjectFile(p: Project, photo: { meta: unknown; laye
 export async function importProjectFile(f: Blob) {
   const zip = await JSZip.loadAsync(f)
   const pj = await zip.file('project.json')?.async('string')
-  if (!pj) throw new Error('Not a Chicken Studios project file')
+  if (!pj) throw new Error('Not a Chiken project file')
   const p = JSON.parse(pj) as Project
   for (const m of p.media) {
     const e = zip.file('media/' + m.id)

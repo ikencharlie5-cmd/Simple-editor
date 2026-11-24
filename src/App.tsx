@@ -34,12 +34,12 @@ export default function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  if (!loaded) return <div style={{ display: 'grid', placeItems: 'center', height: '100%' }}>Loading Chicken Studios…</div>
+  if (!loaded) return <div style={{ display: 'grid', placeItems: 'center', height: '100%' }}>Loading Chiken…</div>
 
   return (
     <div className={'app ' + (tab === 'photo' && screenMode === 2 ? 'screen-full' : '')}>
       <div className="topbar">
-        <div className="brand"><img src="./favicon.svg" alt="" />Chicken Studios</div>
+        <div className="brand"><img src="./favicon.svg" alt="" />Chiken</div>
         <div className="tabs">
           {TABS.map((t, i) => (
             <button key={t.id} className={tab === t.id ? 'on' : ''} title={`Alt+${i + 1}`} onClick={() => useStore.getState().setTab(t.id)}>{t.label}</button>

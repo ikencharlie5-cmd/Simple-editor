@@ -11,8 +11,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
       manifest: {
-        name: 'Chicken Studios',
-        short_name: 'Chicken Studios',
+        name: 'Chiken',
+        short_name: 'Chiken',
         description: 'Photo, video, audio and animation editor that runs in your browser.',
         theme_color: '#16161d',
         background_color: '#16161d',

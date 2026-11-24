@@ -21,7 +21,7 @@ export function newAnimation(name = 'Animation 1'): AnimationDoc {
 function newLayer(kind: AnimLayer['kind'], a: AnimationDoc, extra: Partial<AnimLayer> = {}): AnimLayer {
   return {
     id: nanoid(8), name: kind, kind, visible: true, locked: false, start: 0, end: a.duration, base: { ...BASE }, keys: {},
-    fill: '#ff8a1f', stroke: '#ffffff', strokeWidth: 0, w: 300, h: 300, sides: 5, effect: 'none', presetIn: 'none', presetOut: 'none', presetLoop: 'none',
+    fill: '#8b5cf6', stroke: '#ffffff', strokeWidth: 0, w: 300, h: 300, sides: 5, effect: 'none', presetIn: 'none', presetOut: 'none', presetLoop: 'none',
     ...extra,
   }
 }
@@ -73,8 +73,8 @@ export function Animator() {
 
   const createDoc = () => {
     const a = newAnimation(`Animation ${project.animations.length + 1}`)
-    const t = newLayer('text', a, { name: 'Title', text: 'Hello!', fontSize: 160, bold: true, fill: '#ffffff', stroke: '#ff8a1f', strokeWidth: 8, presetIn: 'pop', presetLoop: 'float' })
-    const s = newLayer('shape', a, { name: 'Circle', shape: 'ellipse', w: 500, h: 500, fill: '#ff8a1f', base: { ...BASE, y: 0 }, presetIn: 'zoom' })
+    const t = newLayer('text', a, { name: 'Title', text: 'Hello!', fontSize: 160, bold: true, fill: '#ffffff', stroke: '#8b5cf6', strokeWidth: 8, presetIn: 'pop', presetLoop: 'float' })
+    const s = newLayer('shape', a, { name: 'Circle', shape: 'ellipse', w: 500, h: 500, fill: '#8b5cf6', base: { ...BASE, y: 0 }, presetIn: 'zoom' })
     a.layers = [t, s]
     update((p) => { p.animations.push(a) })
     setDocId(a.id); setLayerId(t.id); setTime(0)
@@ -459,7 +459,7 @@ export function Animator() {
                 <div className="row kfrow" key={prop}>
                   <div style={{ flex: 1, minWidth: 0 }}><Slider label={prop} min={mn} max={mx} step={st} value={v} onCommit={useStore.getState().checkpoint}
                     onChange={(nv) => editLayer((l) => setProp(l, prop, nv), false)} /></div>
-                  <button className="icon" title="Toggle keyframe" style={{ color: onKey >= 0 ? '#ff8a1f' : keys.length ? '#ffb35c88' : '#666' }}
+                  <button className="icon" title="Toggle keyframe" style={{ color: onKey >= 0 ? '#8b5cf6' : keys.length ? '#a78bfa88' : '#666' }}
                     onClick={() => editLayer((l) => { l.keys[prop] = onKey >= 0 ? keys.filter((_, i) => i !== onKey) : setKey(keys, Math.max(0, local), v) })}>◆</button>
                 </div>
               )

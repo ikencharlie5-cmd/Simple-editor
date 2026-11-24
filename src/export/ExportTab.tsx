@@ -202,15 +202,15 @@ function ProjectCard() {
   return (
     <div className="card">
       <h3>💾 Project file</h3>
-      <div className="hint">Your work autosaves in this browser. Use a <b>.chicken</b> project file to back up or move everything (timeline, media, animations, photo layers) to another computer.</div>
+      <div className="hint">Your work autosaves in this browser. Use a <b>.chiken</b> project file to back up or move everything (timeline, media, animations, photo layers) to another computer.</div>
       <div className="row">
         <button className="primary" disabled={job.running} onClick={() => job.run('Packing project…', async () => {
           const photo = await photoBundle(doc)
           const blob = await exportProjectFile(project, photo.meta ? photo : null)
-          downloadBlob(blob, `${safe(project.name)}.chicken`)
+          downloadBlob(blob, `${safe(project.name)}.chiken`)
         })}>⬇ Save project file</button>
         <button disabled={job.running} onClick={async () => {
-          const [f] = await pickFiles('.chicken,.zip', false)
+          const [f] = await pickFiles('.chiken,.chicken,.zip', false)
           if (!f) return
           await job.run('Opening project…', async () => {
             const { project: p, photo } = await importProjectFile(f)

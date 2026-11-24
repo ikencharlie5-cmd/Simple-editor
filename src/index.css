@@ -5,8 +5,8 @@
   --line: #34343f;
   --text: #e8e8ef;
   --muted: #9a9aab;
-  --accent: #ff8a1f;
-  --accent2: #ffb35c;
+  --accent: #8b5cf6;
+  --accent2: #a78bfa;
   --sel: #3d8bff;
   --danger: #ff4d5e;
   font-family: Inter, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
@@ -23,7 +23,7 @@ button {
 }
 button:hover { border-color: #55556a; background: #30303e; }
 button:disabled { opacity: .45; cursor: default; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #1a1006; font-weight: 600; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #ffffff; font-weight: 600; }
 button.primary:hover { background: var(--accent2); }
 button.active { background: var(--sel); border-color: var(--sel); color: #fff; }
 button.icon { padding: 3px 7px; background: transparent; border-color: transparent; }
@@ -71,7 +71,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .small { font-size: 11px; }
 .hint { color: var(--muted); font-size: 11px; line-height: 1.4; }
 .chip { display: inline-block; padding: 2px 8px; border-radius: 99px; background: var(--panel2); border: 1px solid var(--line); font-size: 11px; cursor: pointer; }
-.chip.on { background: var(--accent); color: #1a1006; border-color: var(--accent); }
+.chip.on { background: var(--accent); color: #ffffff; border-color: var(--accent); }
 
 .modal-backdrop { position: fixed; inset: 0; background: #0009; display: grid; place-items: center; z-index: 900; }
 .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; min-width: 340px; max-width: 90vw; max-height: 86vh; display: flex; flex-direction: column; box-shadow: 0 10px 50px #000a; }
@@ -116,13 +116,13 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .tl-heads-spacer { height: 22px; border-bottom: 1px solid var(--line); }
 .tl-track { height: 52px; border-bottom: 1px solid #2a2a35; position: relative; }
 .tl-track.text { height: 36px; }
-.tl-track.drop { background: #ff8a1f14; }
+.tl-track.drop { background: #8b5cf614; }
 .clip { position: absolute; top: 3px; bottom: 3px; border-radius: 5px; overflow: hidden; cursor: grab; font-size: 11px; color: #fff; border: 1px solid #0005; user-select: none; }
 .clip.video { background: #3a5b9c; }
 .clip.image { background: #3f7a64; }
 .clip.audio { background: #2b6b50; }
 .clip.text { background: #9a5bc9; }
-.clip.animation { background: #c76a1d; }
+.clip.animation { background: #7c3aed; }
 .clip.color { background: #555; }
 .clip.sel { outline: 2px solid #fff; z-index: 2; }
 .clip .label { position: absolute; left: 6px; top: 2px; right: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px #000; pointer-events: none; z-index: 1; }
@@ -175,7 +175,7 @@ input[type='checkbox'] { accent-color: var(--accent); }
 .audio-list { display: flex; flex-direction: column; }
 .audio-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid #2a2a35; }
 .audio-item .aname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.audio-item.on { background: #ff8a1f22; }
+.audio-item.on { background: #8b5cf622; }
 .audio-main { display: flex; flex-direction: column; min-width: 0; overflow: auto; padding: 14px; gap: 14px; }
 .wave { width: 100%; height: 140px; background: #101016; border-radius: 8px; border: 1px solid var(--line); cursor: pointer; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }

@@ -1,4 +1,4 @@
-# 🐔 Chicken Studios
+# 🐔 Chiken
 
 A photo, video, audio and animation editor that runs entirely in your browser. You can install it like an app on a Chromebook, and it works offline.
 
@@ -20,7 +20,7 @@ npm run build      # production build in dist/
 | 🎬 **Video** | A CapCut-style editor: multi-track timeline, split/trim/ripple, speed, volume and fades, text and stickers, filters, adjustments, transitions, in/out/loop animations, keyframes, chroma key, aspect-ratio presets. |
 | 🎵 **Audio** | Import music, 17 built-in royalty-free sounds and loops, voiceover recording, waveform range picking, "fit to video length", and a mixer. |
 | 🐔 **Animator** | Keyframe motion graphics, frame-by-frame drawing with onion skin, and one-click presets. **Send to video editor** stays live-linked: edits in the Animator update the clip in your video. |
-| ⬇ **Export** | MP4/WebM/MOV video, GIF/APNG/sprite sheet, PNG/JPG/WebP (and photo slices), MP3/WAV audio, and `.chicken` project files. |
+| ⬇ **Export** | MP4/WebM/MOV video, GIF/APNG/sprite sheet, PNG/JPG/WebP (and photo slices), MP3/WAV audio, and `.chiken` project files. |
 
 Your work autosaves in the browser (IndexedDB). Use **Export → Project file** to back it up or move it to another computer.
 

@@ -504,7 +504,7 @@ function RightPanels() {
     }, 150)
     return () => clearInterval(i)
   }, [])
-  const SW = ['#000000', '#ffffff', '#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#00c7be', '#007aff', '#5856d6', '#af52de', '#ff2d55', '#8e8e93', '#a2845e', '#ff8a1f']
+  const SW = ['#000000', '#ffffff', '#ff3b30', '#ff9500', '#ffcc00', '#34c759', '#00c7be', '#007aff', '#5856d6', '#af52de', '#ff2d55', '#8e8e93', '#a2845e', '#8b5cf6']
   const selB = doc.selection ? maskBounds(doc.selection, doc.width, doc.height) : null
   const l = doc.layer
   return (

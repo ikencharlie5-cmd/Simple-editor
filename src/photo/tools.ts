@@ -1132,7 +1132,7 @@ export function drawOverlay(x: CanvasRenderingContext2D, zoom: number, phase: nu
   x.lineWidth = px
   // slices
   doc.slices.forEach((s, i) => {
-    x.strokeStyle = i === doc.activeSlice ? '#ffb000' : '#3d8bff'
+    x.strokeStyle = i === doc.activeSlice ? '#c084fc' : '#3d8bff'
     x.lineWidth = px * (i === doc.activeSlice ? 2 : 1)
     x.strokeRect(s.x, s.y, s.w, s.h)
     x.fillStyle = x.strokeStyle; x.font = `${11 * px}px sans-serif`
@@ -1194,7 +1194,7 @@ export function drawOverlay(x: CanvasRenderingContext2D, zoom: number, phase: nu
     x.stroke(); x.strokeStyle = '#fff'; x.lineDashOffset = 4 * px; x.stroke(); x.setLineDash([]); x.lineDashOffset = 0
   }
   if (ts.patchMode === 'drag' && ts.start && ts.cursor) {
-    x.strokeStyle = '#ff8a1f'; x.setLineDash([4 * px, 3 * px]); x.beginPath(); x.moveTo(ts.start.x, ts.start.y); x.lineTo(ts.cursor.x, ts.cursor.y); x.stroke(); x.setLineDash([])
+    x.strokeStyle = '#8b5cf6'; x.setLineDash([4 * px, 3 * px]); x.beginPath(); x.moveTo(ts.start.x, ts.start.y); x.lineTo(ts.cursor.x, ts.cursor.y); x.stroke(); x.setLineDash([])
     const sc = doc.selectionCanvas()
     if (sc) { x.globalAlpha = 0.5; x.drawImage(doc.antsCanvas(phase)!, ts.cursor.x - ts.start.x, ts.cursor.y - ts.start.y); x.globalAlpha = 1 }
   }

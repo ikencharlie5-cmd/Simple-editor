@@ -31,7 +31,7 @@ function Wave({ m, sel, setSel, pos }: { m: MediaItem; sel: [number, number] | n
     cv.width = w; cv.height = h
     const ctx = cv.getContext('2d')!
     ctx.clearRect(0, 0, w, h)
-    if (sel) { ctx.fillStyle = '#ff8a1f33'; ctx.fillRect((sel[0] / m.duration) * w, 0, ((sel[1] - sel[0]) / m.duration) * w, h) }
+    if (sel) { ctx.fillStyle = '#8b5cf633'; ctx.fillRect((sel[0] / m.duration) * w, 0, ((sel[1] - sel[0]) / m.duration) * w, h) }
     const peaks = ready ? getPeaks(m.id, 4000) : null
     ctx.fillStyle = '#7dffbf'
     if (peaks) for (let x = 0; x < w; x++) {
@@ -40,7 +40,7 @@ function Wave({ m, sel, setSel, pos }: { m: MediaItem; sel: [number, number] | n
       ctx.fillRect(x, h / 2 - bh / 2, 1, bh)
     }
     else { ctx.fillStyle = '#888'; ctx.font = `${14 * devicePixelRatio}px sans-serif`; ctx.fillText('Decoding…', 10, h / 2) }
-    ctx.fillStyle = '#ff8a1f'
+    ctx.fillStyle = '#8b5cf6'
     ctx.fillRect((pos / Math.max(0.001, m.duration)) * w, 0, 2 * devicePixelRatio, h)
   }, [ready, m, sel, pos])
   const toT = (e: { clientX: number }) => { const r = ref.current!.getBoundingClientRect(); return Math.max(0, Math.min(m.duration, ((e.clientX - r.left) / r.width) * m.duration)) }

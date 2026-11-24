@@ -17,7 +17,7 @@ const TEXT_TEMPLATES: { name: string; text: string; style: Partial<typeof DEFAUL
   { name: 'Neon', text: 'NEON', style: { size: 110, color: '#39ff14', stroke: '#0b3d00', strokeWidth: 3, font: 'Impact, sans-serif' }, anim: 'zoom' },
   { name: 'Typewriter', text: 'Typing effect…', style: { size: 64, font: 'ui-monospace, monospace', bold: false, strokeWidth: 0 }, anim: 'typewriter' },
   { name: 'Meme', text: 'TOP TEXT', style: { size: 100, font: 'Impact, sans-serif', strokeWidth: 6 } },
-  { name: 'Lower third', text: 'Name Surname\nTitle', style: { size: 48, align: 'left', background: '#ff8a1fdd', color: '#111111', strokeWidth: 0, shadow: false }, anim: 'slide-right' },
+  { name: 'Lower third', text: 'Name Surname\nTitle', style: { size: 48, align: 'left', background: '#8b5cf6dd', color: '#ffffff', strokeWidth: 0, shadow: false }, anim: 'slide-right' },
   { name: 'Handwritten', text: 'hello!', style: { size: 96, font: '"Comic Sans MS", "Segoe Print", cursive', color: '#ffe066' }, anim: 'bounce' },
 ]
 const STICKERS = ['😂', '🔥', '❤️', '👍', '😎', '🎉', '⭐', '💯', '😱', '🐔', '🍗', '🥚', '👀', '✨', '💥', '🎵', '➡️', '✅', '❌', '💀', '🤯', '🙌', '🌈', '☀️']
@@ -68,7 +68,7 @@ function LeftPanel() {
             <button onClick={() => useStore.getState().update((p) => {
               const st = useStore.getState()
               const tr = p.tracks.find((t) => t.kind === 'video')!
-              p.clips.push(makeClip('color', tr.id, st.playhead, 3, { name: 'Color', color: '#ff8a1f' }))
+              p.clips.push(makeClip('color', tr.id, st.playhead, 3, { name: 'Color', color: '#8b5cf6' }))
             })}>＋ Solid color clip</button>
           </div>
         </>}
@@ -182,7 +182,7 @@ function Inspector() {
   const timed = c.kind === 'video' || c.kind === 'audio'
   const keyBtn = (k: keyof Transform) => {
     const onKey = c.keyframes?.[k]?.some((kf) => Math.abs(kf.t - local) < 0.02)
-    return <button className="icon" title="Add/remove keyframe at playhead" style={{ color: onKey ? '#ff8a1f' : hasKeys(k) ? '#ffb35c88' : '#666' }} onClick={() => toggleKey(k)}>◆</button>
+    return <button className="icon" title="Add/remove keyframe at playhead" style={{ color: onKey ? '#8b5cf6' : hasKeys(k) ? '#a78bfa88' : '#666' }} onClick={() => toggleKey(k)}>◆</button>
   }
   return (
     <div className="panel inspector">
