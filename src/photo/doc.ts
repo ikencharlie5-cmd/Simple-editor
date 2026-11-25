@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { nanoid } from 'nanoid'
 import { antsCanvases, maskToCanvas, type Mask } from './algos'
-import { loadDoc, saveDoc, saveBlob, loadBlob } from '../core/db'
+import { loadDoc, saveDoc, saveBlob, loadBlob, deleteBlob, deleteDoc, docKeys } from '../core/db'
 import { drawText, drawShapeProps, renderStyles, hasStyles, type TextProps, type ShapeProps, type LayerStyles } from './live'
 import { FILTERS } from './filters'
 
@@ -113,6 +113,7 @@ export class PhotoDoc {
   historyIndex = -1
   historySource = 0 // for history brush
   name = 'Untitled'
+  id = ''
   /** when true, painting tools edit the active layer's mask */
   maskEdit = false
   private compCache: { v: number; c: HTMLCanvasElement } | null = null
@@ -128,6 +129,10 @@ export class PhotoDoc {
   }
 
   reset(w: number, h: number, fill: string | null = '#ffffff') {
+    // keep the document being replaced: save it before starting a new one
+    if (this.id && this.layers.length) void savePhotoDoc(this)
+    this.id = nanoid(10)
+    this.name = 'Untitled'
     this.width = w; this.height = h
     const c = makeCanvas(w, h)
     if (fill) { const x = ctx2d(c); x.fillStyle = fill; x.fillRect(0, 0, w, h) }
@@ -316,17 +321,37 @@ export class PhotoDoc {
   flatten(): HTMLCanvasElement { return this.composite() }
 }
 
-/* ---- persistence ---- */
-interface SavedMeta { w: number; h: number; name: string; layers: LayerMeta[]; active: number; paths: VPath[]; slices: Rect[]; notes: PhotoDoc['notes']; counts: PhotoDoc['counts'] }
+/* ---- persistence (one record per photo document) ---- */
+interface SavedMeta { id?: string; w: number; h: number; name: string; layers: LayerMeta[]; active: number; paths: VPath[]; slices: Rect[]; notes: PhotoDoc['notes']; counts: PhotoDoc['counts']; updatedAt?: number; thumb?: string }
+export interface PhotoDocInfo { id: string; name: string; w: number; h: number; updatedAt: number; thumb?: string; layers: number }
+
+function thumbOf(d: PhotoDoc) {
+  const c = d.composite(), s = Math.min(1, 200 / Math.max(c.width, c.height))
+  const t = makeCanvas(Math.max(1, Math.round(c.width * s)), Math.max(1, Math.round(c.height * s)))
+  ctx2d(t).drawImage(c, 0, 0, t.width, t.height)
+  return t.toDataURL('image/jpeg', 0.7)
+}
 
 export async function savePhotoDoc(d: PhotoDoc) {
-  const meta: SavedMeta = { w: d.width, h: d.height, name: d.name, active: d.active, paths: d.paths, slices: d.slices, notes: d.notes, counts: d.counts, layers: d.layers.map(layerMeta) }
+  const id = d.id
+  if (!id) return
+  const meta: SavedMeta = { id, w: d.width, h: d.height, name: d.name, active: d.active, paths: d.paths, slices: d.slices, notes: d.notes, counts: d.counts, layers: d.layers.map(layerMeta), updatedAt: Date.now(), thumb: thumbOf(d) }
   const put = (c: HTMLCanvasElement, key: string) => new Promise<void>((res) => c.toBlob(async (b) => { if (b) await saveBlob(key, b); res() }, 'image/png'))
   await Promise.all(d.layers.flatMap((l) => [put(l.canvas, 'photo-layer:' + l.id), ...(l.mask ? [put(l.mask, 'photo-mask:' + l.id)] : [])]))
-  await saveDoc('photo-doc', meta)
+  await saveDoc('photo-doc:' + id, meta)
+  if (d.id === id) await saveDoc('photo-current', id)
 }
-export async function loadPhotoDoc(d: PhotoDoc) {
-  const meta = await loadDoc<SavedMeta>('photo-doc')
+
+/** Load a photo document (the last one used if no id is given). */
+export async function loadPhotoDoc(d: PhotoDoc, id?: string) {
+  let meta: SavedMeta | undefined
+  const cur = id ?? (await loadDoc<string>('photo-current'))
+  if (cur) meta = await loadDoc<SavedMeta>('photo-doc:' + cur)
+  if (!meta && !id) {
+    // older versions stored a single document under 'photo-doc'
+    meta = await loadDoc<SavedMeta>('photo-doc')
+    if (meta) meta.id = nanoid(10)
+  }
   if (!meta) return false
   const layers: Layer[] = []
   for (const lm of meta.layers) {
@@ -343,12 +368,40 @@ export async function loadPhotoDoc(d: PhotoDoc) {
     layers.push({ ...rest, canvas: c, mask })
   }
   if (!layers.length) return false
+  d.id = meta.id!
   d.width = meta.w; d.height = meta.h; d.name = meta.name; d.layers = layers; d.active = Math.min(meta.active, layers.length - 1)
   d.paths = meta.paths ?? []; d.slices = meta.slices ?? []; d.notes = meta.notes ?? []; d.counts = meta.counts ?? []
-  d.history = []; d.historyIndex = -1; d.selection = null; d.invalidateSel()
+  d.history = []; d.historyIndex = -1; d.selection = null; d.maskEdit = false; d.invalidateSel()
   d.commit('Open')
   d.historySource = 0
+  await saveDoc('photo-current', d.id)
   return true
+}
+
+export async function listPhotoDocs(): Promise<PhotoDocInfo[]> {
+  const out: PhotoDocInfo[] = []
+  for (const k of (await docKeys()).map(String).filter((k) => k.startsWith('photo-doc:'))) {
+    const m = await loadDoc<SavedMeta>(k)
+    if (m?.id) out.push({ id: m.id, name: m.name, w: m.w, h: m.h, updatedAt: m.updatedAt ?? 0, thumb: m.thumb, layers: m.layers.length })
+  }
+  return out.sort((a, b) => b.updatedAt - a.updatedAt)
+}
+export async function deletePhotoDoc(id: string) {
+  const m = await loadDoc<SavedMeta>('photo-doc:' + id)
+  if (m) for (const l of m.layers) { await deleteBlob('photo-layer:' + l.id); await deleteBlob('photo-mask:' + l.id) }
+  await deleteDoc('photo-doc:' + id)
+}
+export async function duplicatePhotoDoc(id: string) {
+  const m = await loadDoc<SavedMeta>('photo-doc:' + id)
+  if (!m) return
+  const copy: SavedMeta = { ...JSON.parse(JSON.stringify(m)), id: nanoid(10), name: m.name + ' copy', updatedAt: Date.now() }
+  for (const l of copy.layers) {
+    const old = l.id
+    l.id = nanoid(8)
+    const b = await loadBlob('photo-layer:' + old); if (b) await saveBlob('photo-layer:' + l.id, b)
+    const mb = await loadBlob('photo-mask:' + old); if (mb) await saveBlob('photo-mask:' + l.id, mb)
+  }
+  await saveDoc('photo-doc:' + copy.id, copy)
 }
 
 /* ---- reactive version counter ---- */
@@ -381,7 +434,7 @@ export function bump(persist = false) {
 /** Bundle the photo document for a project file. */
 export async function photoBundle(d: PhotoDoc) {
   await savePhotoDoc(d)
-  const meta = await loadDoc<SavedMeta>('photo-doc')
+  const meta = await loadDoc<SavedMeta>('photo-doc:' + d.id)
   const layers: { id: string; blob: Blob }[] = []
   for (const l of d.layers) {
     const b = await loadBlob('photo-layer:' + l.id)
@@ -392,9 +445,13 @@ export async function photoBundle(d: PhotoDoc) {
   return { meta, layers }
 }
 export async function restorePhotoBundle(d: PhotoDoc, meta: unknown, layers: Record<string, Blob>) {
-  await saveDoc('photo-doc', meta)
+  const m = meta as SavedMeta
+  if (!m.id) m.id = nanoid(10)
+  if (d.id && d.layers.length) await savePhotoDoc(d)
+  await saveDoc('photo-doc:' + m.id, m)
+  await saveDoc('photo-current', m.id)
   for (const [id, b] of Object.entries(layers)) await saveBlob(id.startsWith('mask_') ? 'photo-mask:' + id.slice(5) : 'photo-layer:' + id, b)
-  await loadPhotoDoc(d)
+  await loadPhotoDoc(d, m.id)
   bump()
 }
 

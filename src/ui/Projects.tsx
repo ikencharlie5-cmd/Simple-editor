@@ -5,13 +5,18 @@ import { useStore, projectDuration } from '../core/store'
 import type { Project } from '../core/types'
 import { TEMPLATES } from '../core/templates'
 import { nanoid } from 'nanoid'
+import { doc, listPhotoDocs, loadPhotoDoc, deletePhotoDoc, duplicatePhotoDoc, savePhotoDoc, bump, type PhotoDocInfo } from '../photo/doc'
+import { fitView } from '../photo/PhotoEditor'
+import { PHOTO_TEMPLATES, applyPhotoTemplate } from '../photo/templates'
 
 interface Row { id: string; name: string; updatedAt: number; clips: number; dur: number; w: number; h: number }
 
-export function ProjectsDialog({ onClose, startOnNew = false }: { onClose: () => void; startOnNew?: boolean }) {
+export function ProjectsDialog({ onClose, startOnNew = false, startOnPhotos = false }: { onClose: () => void; startOnNew?: boolean; startOnPhotos?: boolean }) {
   const current = useStore((s) => s.project)
   const [rows, setRows] = useState<Row[]>([])
-  const [view, setView] = useState<'list' | 'new'>(startOnNew ? 'new' : 'list')
+  const [view, setView] = useState<'list' | 'new' | 'photos'>(startOnNew ? 'new' : startOnPhotos ? 'photos' : 'list')
+  const [photos, setPhotos] = useState<PhotoDocInfo[] | null>(null)
+  const refreshPhotos = async () => { if (doc.layers.length) await savePhotoDoc(doc); setPhotos(await listPhotoDocs()) }
   const [busy, setBusy] = useState<string | null>(null)
   const refresh = async () => {
     // make sure the open project is saved first
@@ -26,6 +31,8 @@ export function ProjectsDialog({ onClose, startOnNew = false }: { onClose: () =>
   }
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { void refresh() }, [])
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { if (view === 'photos' && !photos) void refreshPhotos() }, [view])
   const open = async (id: string) => {
     const p = await loadDoc<Project>('project:' + id)
     if (!p) return
@@ -67,12 +74,31 @@ export function ProjectsDialog({ onClose, startOnNew = false }: { onClose: () =>
     } finally { setBusy(null) }
   }
   return (
-    <Modal title={view === 'list' ? 'Your projects' : 'New project'} onClose={onClose}>
+    <Modal title={view === 'list' ? 'Your video projects' : view === 'photos' ? 'Your photos' : 'New project'} onClose={onClose}>
       <div className="row">
         <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')}>📂 My projects</button>
+        <button className={view === 'photos' ? 'active' : ''} onClick={() => setView('photos')}>🖼 Photos</button>
         <button className={view === 'new' ? 'active' : ''} onClick={() => setView('new')}>＋ New from template</button>
       </div>
-      {view === 'list' ? (
+      {view === 'photos' ? (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 'min(560px, 80vw)' }}>
+          <div className="row">
+            <button className="primary" onClick={() => { doc.reset(1920, 1080, '#ffffff'); doc.name = 'Untitled'; bump(); useStore.getState().setTab('photo'); setTimeout(fitView, 50); onClose() }}>＋ New blank photo</button>
+            {PHOTO_TEMPLATES.map((t, i) => <button key={t.name} onClick={() => { applyPhotoTemplate(i); useStore.getState().setTab('photo'); setTimeout(fitView, 50); onClose() }}>{t.name}</button>)}
+          </div>
+          {(photos ?? []).map((r) => (
+            <div key={r.id} className="audio-item" style={{ border: '1px solid var(--line)', borderRadius: 8, background: r.id === doc.id ? '#8b5cf622' : undefined }}>
+              {r.thumb ? <img src={r.thumb} alt="" style={{ width: 64, height: 44, objectFit: 'contain', background: '#0d0d12', borderRadius: 4 }} /> : <span style={{ width: 64 }}>🖼</span>}
+              <span className="aname"><b>{r.name}</b><br /><span className="muted small">{r.w}×{r.h} · {r.layers} layers · edited {new Date(r.updatedAt).toLocaleString()}</span></span>
+              {r.id === doc.id ? <span className="chip on">Open</span> : <button className="primary" onClick={async () => { await savePhotoDoc(doc); await loadPhotoDoc(doc, r.id); useStore.getState().setTab('photo'); setTimeout(fitView, 50); onClose() }}>Open</button>}
+              <button title="Duplicate" onClick={async () => { await duplicatePhotoDoc(r.id); await refreshPhotos() }}>⧉</button>
+              <button className="danger" title="Delete" onClick={async () => { if (r.id === doc.id) return useStore.getState().notify("You can't delete the photo that is open"); if (!confirm(`Delete "${r.name}"?`)) return; await deletePhotoDoc(r.id); await refreshPhotos() }}>🗑</button>
+            </div>
+          ))}
+          {!photos && <div className="hint">Loading…</div>}
+          <div className="hint">Each photo is saved separately on this Chromebook. Opening one keeps the others safe.</div>
+        </div>
+      ) : view === 'list' ? (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 'min(560px, 80vw)' }}>
           {rows.map((r) => (
             <div key={r.id} className="audio-item" style={{ border: '1px solid var(--line)', borderRadius: 8, background: r.id === current.id ? '#8b5cf622' : undefined }}>

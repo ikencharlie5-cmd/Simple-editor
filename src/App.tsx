@@ -3,7 +3,7 @@ import { ProjectsDialog } from './ui/Projects'
 import { HelpDialog, Tour } from './ui/Help'
 import { useStore, initPersistence, type Tab } from './core/store'
 import { usePhoto } from './photo/doc'
-import { PhotoEditor } from './photo/PhotoEditor'
+import { PhotoEditor, setOpenProjectsPhotos } from './photo/PhotoEditor'
 import { VideoEditor } from './video/VideoEditor'
 import { AudioTab } from './audio/AudioTab'
 import { Animator } from './animator/Animator'
@@ -24,7 +24,8 @@ export default function App() {
   const saveStatus = useStore((s) => s.saveStatus)
   const name = useStore((s) => s.project.name)
   const screenMode = usePhoto((s) => s.screenMode)
-  const [dlg, setDlg] = useState<null | 'projects' | 'new' | 'help' | 'tour'>(null)
+  const [dlg, setDlg] = useState<null | 'projects' | 'new' | 'photos' | 'help' | 'tour'>(null)
+  useEffect(() => { setOpenProjectsPhotos(() => setDlg('photos')) }, [])
   const [panels, setPanels] = useState<{ left: boolean; right: boolean }>({ left: false, right: false })
   useEffect(() => { try { if (!localStorage.getItem('chiken-tour-done')) setDlg('tour') } catch { /* storage blocked */ } }, [])
   useEffect(() => { setPanels({ left: false, right: false }) }, [tab])
@@ -70,7 +71,7 @@ export default function App() {
         {tab === 'export' && <ExportTab />}
       </div>
       {toast && <div className="toast">{toast}</div>}
-      {(dlg === 'projects' || dlg === 'new') && <ProjectsDialog startOnNew={dlg === 'new'} onClose={() => setDlg(null)} />}
+      {(dlg === 'projects' || dlg === 'new' || dlg === 'photos') && <ProjectsDialog startOnNew={dlg === 'new'} startOnPhotos={dlg === 'photos' || (dlg === 'projects' && tab === 'photo')} onClose={() => setDlg(null)} />}
       {dlg === 'help' && <HelpDialog onClose={() => setDlg(null)} />}
       {dlg === 'tour' && <Tour onClose={() => { try { localStorage.setItem('chiken-tour-done', '1') } catch { /* */ } setDlg(null) }} />}
     </div>

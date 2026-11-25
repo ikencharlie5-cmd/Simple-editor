@@ -165,6 +165,7 @@ function MenuBar({ onDialog }: { onDialog: (d: Dialog) => void }) {
     File: [
       { label: 'New…', key: 'Ctrl+N', action: () => onDialog({ kind: 'new' }) },
       { label: 'Open image…', key: 'Ctrl+O', action: () => void openImage(false) },
+      { label: 'My photos…', action: () => openProjectsPhotos?.() },
       { label: 'Place image as layer…', action: () => void openImage(true) },
       '-',
       { label: 'Send to Video Editor', action: () => void sendToVideo() },
@@ -324,6 +325,8 @@ function FilterDialog({ f, onClose }: { f: FilterDef; onClose: () => void }) {
 }
 
 let openDialogGlobal: ((d: Dialog) => void) | null = null
+export let openProjectsPhotos: (() => void) | null = null
+export const setOpenProjectsPhotos = (f: () => void) => { openProjectsPhotos = f }
 
 function AdjustDialog({ layerId, onClose }: { layerId: string; onClose: () => void }) {
   const l = doc.layers.find((x) => x.id === layerId)
